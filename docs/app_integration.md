@@ -55,5 +55,6 @@ The detailed `results.xlsx` stays available as a download.
    - Create it with Lovable Cloud or your own Supabase.
    - Store the API URL and key as Supabase secrets.
    - Let an edge function call the API, and store runs and results in Supabase tables.
+   - Prompts for building the app: [`lovable_app_prompt.md`](lovable_app_prompt.md).
    - Screens: input editor (products, channels, materials, forecast upload), run list, decisions of the week, service heat map (week × channel), cost breakdown, policy chart (s/S over time).
 4. **Later.** Scheduled weekly runs (rolling review), user accounts, comparison of scenarios.
