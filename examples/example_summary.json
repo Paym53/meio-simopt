@@ -2,7 +2,7 @@
   "run": {
     "run_folder": "output/example_quick",
     "timestamp": "2026-09-27 13:50:00",
-    "policy": "C: B + week-1 lookahead",
+    "policy": "age-aware capped (s,S) + week-1 lookahead",
     "preset": "quick",
     "seeds_search_hold_out_test": "200 / 400 / 2000",
     "simulated_schedules_search_evaluations": 1025,

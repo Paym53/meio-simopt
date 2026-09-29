@@ -2,6 +2,10 @@
 
 *Status: 27 September 2026. Decision: policy variant C is the main policy of the model.*
 
+*Update 29 September 2026: C is now the **only** policy in the code. Variants A and B, the `--variant` option
+and `compare_policies.py` were removed. This document stays as the record of why C was chosen; the
+comparison below can be reproduced from the git history (commit before the removal).*
+
 ## 1. The three policy variants
 
 | Variant | DC rule | RMW rule | Orders committed this week |
@@ -29,7 +33,7 @@
 
 A fixed per-period quantity plan (R, Qₜ) was rejected as the policy. It cannot react to realised demand, and it cannot create a central raw-material buffer (proof in the v3 design notes). The "optimise the orders directly" idea is used where it helps: in the week-1 lookahead.
 
-## 3. Comparison run (`compare_policies.py`)
+## 3. Comparison run (`compare_policies.py`, removed since)
 
 **Setup.** 300 search / 600 hold-out / 5,000 test seeds, the same seeds for every variant, 36-week horizon.
 - **A:** tuned from the quantile start.
@@ -65,7 +69,7 @@ C also has higher realised fill rates: Online 0.998 vs 0.993, Outlet 0.991 vs 0.
    - Long, variable lead times: −15 %.
    - Short shelf life: −9 to −20 %.
    - Large lots: B and A tie.
-3. **The search start changes results by 7–18 %** (B vs B0), as much as the policy does. Improving the search is the next step, starting with multi-start (quantile start + warm start from A).
+3. **The search start changes results by 7–18 %** (B vs B0), as much as the policy does. Improving the search is the next step, starting with multi-start (several start schedules).
 4. **Configurations 3 and 4 cannot reach Retail's 98 % target with any policy.** Freshness gate and lead times are incompatible.
 
 ## 4. Open points

@@ -5,9 +5,8 @@ Run one review of the MEIO simulation-optimisation model.
     python main.py --preset quick                  fast run (~1-2 min)
     python main.py --preset full                   more seeds (~5-6 min)
     python main.py --input my_case.json            your own input (format: meio/io_json.py)
-    python main.py --variant A                     benchmark policies: A plain (s,S), B age-aware capped (s,S)
 
-Main policy (variant C):
+Policy (the only one in the model):
     age-aware (s,S) rule with DC order cap and RMW minimum, tuned by simulation-optimisation,
     plus a week-1 lookahead that chooses the orders committed now by simulating
     candidate quantities from the current state.
@@ -16,7 +15,7 @@ Steps:
     1. read and check the input
     2. draw three disjoint seed sets (search, hold-out, test)
     3. tune the week-specific (s,S) schedule (repair -> improve -> hold-out check)
-    4. choose the week-1 orders by lookahead (variant C)
+    4. choose the week-1 orders by lookahead
     5. final verdict on the untouched test seeds
     6. print the overview and write  output/<run>/results.xlsx, summary.json, input.json
 """
@@ -30,8 +29,8 @@ from datetime import datetime
 import pandas as pd
 
 from meio import report, service, tables
-from meio.config import (PRESETS, VARIANTS, ModelInput, PolicyVariant, SearchSettings, build_example_input,
-                         settings_for_preset, validate_input)
+from meio.config import (POLICY_NAME, PRESETS, ModelInput, SearchSettings, build_example_input, settings_for_preset,
+                         validate_input)
 from meio.excel_export import write_workbook
 from meio.io_json import build_summary, load_model, model_to_dict, save_json
 from meio.lookahead import lookahead_week1
@@ -41,8 +40,7 @@ from meio.search import Searcher
 from meio.simulation import simulate
 
 
-def run(model: ModelInput, settings: SearchSettings, variant: PolicyVariant, run_dir: str,
-        preset_name: str = "") -> dict:
+def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: str = "") -> dict:
     """Run one review and write all outputs to run_dir. Returns the summary dict."""
     started = time.time()
     validate_input(model)
@@ -56,28 +54,25 @@ def run(model: ModelInput, settings: SearchSettings, variant: PolicyVariant, run
     test_seeds = build_scenarios(model, settings.n_test_seeds, settings.base_seed + 3, "test")
 
     # 3. tune the (s,S) schedule
-    print(f"\nPolicy {variant.name}")
+    print(f"\nPolicy: {POLICY_NAME}")
     print("Tuning the (s,S) schedule ...")
-    outcome = Searcher(model, settings, search_seeds, holdout_seeds, variant=variant).run()
+    outcome = Searcher(model, settings, search_seeds, holdout_seeds).run()
 
-    # 4. variant C: choose the committed week-1 orders by simulated lookahead
-    week1_orders, rule_orders, lookahead_log = None, None, pd.DataFrame()
-    if variant.lookahead:
-        print("Week-1 lookahead ...")
-        week1_orders, rule_orders, lookahead_log = lookahead_week1(
-            model, outcome.schedule, variant, search_seeds, settings, outcome.margins, outcome.unfixable)
+    # 4. choose the committed week-1 orders by simulated lookahead
+    print("Week-1 lookahead ...")
+    week1_orders, rule_orders, lookahead_log = lookahead_week1(
+        model, outcome.schedule, search_seeds, settings, outcome.margins, outcome.unfixable)
     search_time = time.time() - started
 
     # 5. final verdict on the test seeds (with full trace for a few seeds)
     test_result = simulate(model, outcome.schedule, test_seeds, trace_seeds=settings.trace_seeds,
-                           variant=variant, week1_orders=week1_orders)
+                           week1_orders=week1_orders)
     test_cells = service.final_verdict(service.cell_table(model, test_result))
     cells = tables.service_cells_table(outcome.last_search_eval.cells, outcome.last_holdout_cells,
                                        test_cells, outcome.unfixable)
 
     # 6. tables, overview, outputs
-    decisions = pd.DataFrame(committed_decisions(model, outcome.schedule, test_result, rule_orders,
-                                                 uses_cap_and_floor=variant.cap_and_floor))
+    decisions = pd.DataFrame(committed_decisions(model, outcome.schedule, test_result, rule_orders))
     for col in ("Position", "Expected waste", "Effective position", "s (week 1)", "S (week 1)",
                 "Rule quantity", "Committed quantity"):
         decisions[col] = decisions[col].astype("Int64")
@@ -95,7 +90,7 @@ def run(model: ModelInput, settings: SearchSettings, variant: PolicyVariant, run
     run_info = {
         "run folder": run_dir,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "policy": variant.name,
+        "policy": POLICY_NAME,
         "preset": preset_name or "custom",
         "seeds (search / hold-out / test)": f"{settings.n_search_seeds} / {settings.n_holdout_seeds} / "
                                             f"{settings.n_test_seeds}",
@@ -108,11 +103,10 @@ def run(model: ModelInput, settings: SearchSettings, variant: PolicyVariant, run
         "mean cost over horizon (test seeds)": round(test_result.mean_total_cost()),
         "test cells passing": f"{int(cells['test_pass'].sum())} / {len(cells)}",
     }
-    if variant.cap_and_floor:
-        for name, cap in outcome.schedule.dc_cap.items():
-            run_info[f"DC order cap {name}"] = cap
-        for name, floor in outcome.schedule.rm_floor.items():
-            run_info[f"RMW minimum physical stock {name}"] = floor
+    for name, cap in outcome.schedule.dc_cap.items():
+        run_info[f"DC order cap {name}"] = cap
+    for name, floor in outcome.schedule.rm_floor.items():
+        run_info[f"RMW minimum physical stock {name}"] = floor
 
     excel_path = os.path.join(run_dir, "results.xlsx")
     report.print_results(model, decisions, schedule_df, cells, costs, kpis, checks, run_info, excel_path)
@@ -155,10 +149,8 @@ def run(model: ModelInput, settings: SearchSettings, variant: PolicyVariant, run
          pd.DataFrame(tr.orders).sort_values(["seed", "lane", "item", "order_week"])),
         ("23_Checks", "Unit balances over all test seeds", checks),
         ("24_Search_Log", "Accepted search steps", pd.DataFrame(outcome.search_log)),
+        ("25_Lookahead", "Week-1 lookahead: every candidate quantity, evaluated on the search seeds", lookahead_log),
     ]
-    if variant.lookahead:
-        sheets.append(("25_Lookahead", "Week-1 lookahead: every candidate quantity, evaluated on the search seeds",
-                       lookahead_log))
     write_workbook(excel_path, sheets)
 
     summary = build_summary(model, run_info, decisions, cells, costs, kpis, outcome.schedule, weekly)
@@ -172,8 +164,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="MEIO simulation-optimisation - one review")
     parser.add_argument("--input", help="input JSON file (default: built-in example)")
     parser.add_argument("--preset", default="standard", choices=list(PRESETS), help="seed counts and search effort")
-    parser.add_argument("--variant", default="C", choices=sorted(VARIANTS),
-                        help="C (default) = age-aware capped (s,S) + lookahead | B without lookahead | A plain (s,S)")
     parser.add_argument("--out-dir", default="output", help="folder for the run folders")
     parser.add_argument("--name", help="name of the run folder (default: run_<timestamp>)")
     args = parser.parse_args()
@@ -181,7 +171,7 @@ def main() -> None:
     model = load_model(args.input) if args.input else build_example_input()
     settings = settings_for_preset(args.preset)
     run_name = args.name or datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    run(model, settings, VARIANTS[args.variant], os.path.join(args.out_dir, run_name), args.preset)
+    run(model, settings, os.path.join(args.out_dir, run_name), args.preset)
 
 
 if __name__ == "__main__":

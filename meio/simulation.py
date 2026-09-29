@@ -6,11 +6,12 @@ seed. The weekly steps are:
 
   Step 1  ageing                  (all stock one week older)
   Step 2  receipts                (supplier -> RMW, production -> DC, enter at age 1)
-  Step 3a DC ordering             (s,S rule on the DC inventory position)
+  Step 3a DC ordering             (s,S rule on the effective DC position, order cap)
   Step 3b production release      (capped by usable RM, capacity, batch size and MOQ;
                                    the rest is cancelled)
   Step 3c RM transport            (RMW -> PF in the release week, oldest first)
-  Step 3d RMW ordering            (s,S rule on the echelon position)
+  Step 3d RMW ordering            (s,S rule on the effective echelon position,
+                                   minimum physical RM stock)
   Step 4  demand and allocation   (oldest age first; within an age the strictest
                                    channel first; unmet demand is lost)
   Step 5  service recording       (fill rate per seed, week and channel)
@@ -25,7 +26,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .config import VARIANT_A, ModelInput, PolicyVariant, Product, Tier
+from .config import ModelInput, Product, Tier
 from .policy import PolicySchedule, dc_order_weeks, rm_order_weeks
 from .scenarios import ScenarioSet
 
@@ -65,7 +66,6 @@ class SimResult:
     fill: dict[tuple[str, str], np.ndarray]          # NaN where demand = 0
     cost_weekly: dict[str, np.ndarray]
     trace: Trace
-    variant_name: str = ""
 
     def cost_per_seed(self) -> dict[str, np.ndarray]:
         return {name: arr.sum(axis=1) for name, arr in self.cost_weekly.items()}
@@ -215,9 +215,8 @@ def _age_row(prefix: dict, stock_row: np.ndarray) -> dict:
 # The simulation
 # ---------------------------------------------------------------------------
 def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
-             trace_seeds: list[int] | tuple = (), variant: PolicyVariant = VARIANT_A,
-             week1_orders: dict | None = None) -> SimResult:
-    """Simulate all seeds of `scen` under the (s,S) schedule and policy variant.
+             trace_seeds: list[int] | tuple = (), week1_orders: dict | None = None) -> SimResult:
+    """Simulate all seeds of `scen` under the age-aware capped (s,S) policy.
 
     week1_orders (optional): {"dc": {product: Q}, "rm": {material: O}} replaces the
     rule's orders in week 1 only. Used by the lookahead to test candidate quantities."""
@@ -331,14 +330,11 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             pipeline = dc_arrivals[p.name][:, t + 1:].sum(axis=1)
             position = on_hand + pipeline
 
-            # variant B/C: subtract stock expected to expire before a new order arrives
-            if variant.expected_waste:
-                window = [_mean_channel_demand(model, p, t + w) for w in range(p.lead_time_median)]
-                expected_waste = projected_fg_waste(dc_stock[p.name], window,
-                                                     [p.max_age_for_channel(c) for c in p.channels],
-                                                     p.channel_priority())
-            else:
-                expected_waste = np.zeros(n)
+            # subtract stock expected to expire before a new order arrives
+            window = [_mean_channel_demand(model, p, t + w) for w in range(p.lead_time_median)]
+            expected_waste = projected_fg_waste(dc_stock[p.name], window,
+                                                 [p.max_age_for_channel(c) for c in p.channels],
+                                                 p.channel_priority())
             dc_expected_waste[p.name] = expected_waste
             effective = position - expected_waste
 
@@ -347,10 +343,10 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                 trigger = effective < schedule.dc_s[p.name][t]
                 need = schedule.dc_S[p.name][t] - effective
                 Q = np.where(trigger, round_up_to_order_rules(need, p.batch_size, p.moq), 0)
-                if variant.cap_and_floor:                  # order cap (multiple of the batch size)
-                    cap = max(p.moq, (schedule.dc_cap[p.name] // p.batch_size) * p.batch_size)
-                    capped = Q > cap
-                    Q = np.minimum(Q, cap)
+                # order cap (multiple of the batch size)
+                cap = max(p.moq, (schedule.dc_cap[p.name] // p.batch_size) * p.batch_size)
+                capped = Q > cap
+                Q = np.minimum(Q, cap)
             else:
                 Q = np.zeros(n, dtype=np.int64)
             if t == 1 and p.name in week1_orders["dc"]:    # lookahead candidate for week 1
@@ -451,13 +447,10 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                 downstream_waste += p.bom[m.name] * dc_expected_waste[p.name]
             echelon = on_hand + pipeline + downstream
 
-            # variant B/C: RM expected to expire before a new supplier order arrives
-            if variant.expected_waste:
-                weekly_use = [sum(p.bom[m.name] * sum(_mean_channel_demand(model, p, t + j + p.lead_time_median))
-                                  for p in users) for j in range(m.lead_time_median)]
-                rm_waste = projected_rm_waste(rm_stock[m.name], weekly_use, m.max_shippable_age)
-            else:
-                rm_waste = np.zeros(n)
+            # RM expected to expire before a new supplier order arrives
+            weekly_use = [sum(p.bom[m.name] * sum(_mean_channel_demand(model, p, t + j + p.lead_time_median))
+                              for p in users) for j in range(m.lead_time_median)]
+            rm_waste = projected_rm_waste(rm_stock[m.name], weekly_use, m.max_shippable_age)
             effective_echelon = echelon - rm_waste - downstream_waste
             installation = on_hand + pipeline - rm_waste   # physical RM at / on the way to the RMW
 
@@ -465,9 +458,9 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             if t in rm_can_order[m.name]:
                 trigger = effective_echelon < schedule.rm_s[m.name][t]
                 need = np.where(trigger, schedule.rm_S[m.name][t] - effective_echelon, 0.0)
-                if variant.cap_and_floor:                  # minimum physical stock at the RMW
-                    floor_triggered = installation < schedule.rm_floor[m.name]
-                    need = np.maximum(need, np.where(floor_triggered, schedule.rm_floor[m.name] - installation, 0.0))
+                # minimum physical stock at the RMW
+                floor_triggered = installation < schedule.rm_floor[m.name]
+                need = np.maximum(need, np.where(floor_triggered, schedule.rm_floor[m.name] - installation, 0.0))
                 O = round_up_to_order_rules(need, m.batch_size, m.moq)
                 if m.supplier_capacity is not None:
                     O = round_down_to_supply_rules(np.minimum(O, m.supplier_capacity), m.batch_size, m.moq)
@@ -554,4 +547,4 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                                "stage": "end (after shipment + waste)"}, stock[s]))
     # =======================================================================
 
-    return SimResult(scen.name, n, H, dc_rec, rm_rec, ch_rec, fill, cost, trace, variant.name)
+    return SimResult(scen.name, n, H, dc_rec, rm_rec, ch_rec, fill, cost, trace)

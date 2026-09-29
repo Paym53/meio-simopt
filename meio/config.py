@@ -205,26 +205,13 @@ class ModelInput:
         return list(range(self.lead_time_max_global + 1, self.horizon + 1))
 
 
-@dataclass(frozen=True)
-class PolicyVariant:
-    """Which policy logic is used.
-
-    A  plain (s,S):              positions count all stock, no cap, no RMW minimum
-    B  age-aware capped (s,S):   positions minus expected waste (median lead time window),
-                                 DC order cap, minimum physical stock at the RMW
-    C  B + lookahead:            the committed week-1 orders are chosen by simulating
-                                 candidate quantities from the current state
-    """
-    name: str
-    expected_waste: bool = False
-    cap_and_floor: bool = False
-    lookahead: bool = False
-
-
-VARIANT_A = PolicyVariant("A: plain (s,S)")
-VARIANT_B = PolicyVariant("B: age-aware capped (s,S)", expected_waste=True, cap_and_floor=True)
-VARIANT_C = PolicyVariant("C: B + week-1 lookahead", expected_waste=True, cap_and_floor=True, lookahead=True)
-VARIANTS = {"A": VARIANT_A, "B": VARIANT_B, "C": VARIANT_C}
+# The model uses one ordering policy (see docs/policy_choice.md):
+#   * age-aware (s,S): positions minus the stock expected to expire before a new order
+#     arrives (median lead-time window),
+#   * a DC order cap per product and a minimum physical stock per raw material at the RMW,
+#   * the committed week-1 orders are chosen by a lookahead that simulates candidate
+#     quantities from the current state (meio/lookahead.py).
+POLICY_NAME = "age-aware capped (s,S) + week-1 lookahead"
 
 
 @dataclass

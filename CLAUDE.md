@@ -8,16 +8,15 @@ on any conflict.
 
 ## What this is
 Simulation-optimisation model for a perishable two-echelon supply chain: suppliers → raw-material warehouse (RMW) → production (PF, no stock) → DC → sales channels.
-- **Main policy (variant C):** an age-aware (s,S) rule with a DC order cap and RMW minimums, tuned by simulation, plus a week-1 lookahead.
+- **Policy (the only one):** an age-aware (s,S) rule with a DC order cap and RMW minimums, tuned by simulation, plus a week-1 lookahead. No policy variants or benchmark switches; `test_only_one_policy_exists_in_the_code` enforces this.
 - **Design documents:** `docs/model_specification_v5.md` and `docs/policy_choice.md`.
 
 ## Commands
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                         # must pass before every commit (23+ tests)
+python -m pytest -q                         # must pass before every commit (27+ tests)
 python main.py --preset quick               # end-to-end check, ~1-2 min, writes output/run_*/
 python main.py --input examples/example_input.json --preset quick
-python compare_policies.py --no-rolling     # policy benchmark, slow (~20 min)
 ```
 
 ## Conventions (do not break)
@@ -48,6 +47,6 @@ python compare_policies.py --no-rolling     # policy benchmark, slow (~20 min)
 - `output/` is git-ignored; never commit run results.
 
 ## Planned next work
-1. Search algorithm: multi-start (quantile start + warm start from variant A), fewer parameters, a better optimiser.
+1. Search algorithm: multi-start (quantile start + further start schedules), fewer parameters, a better optimiser.
 2. Several finished goods sharing raw materials; realistic holding costs (unit value × rate + storage).
 3. Web API (FastAPI, asynchronous runs) for a Lovable frontend (see `docs/app_integration.md`).

@@ -10,7 +10,7 @@ RMW rule  (per material r, week t):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -20,15 +20,15 @@ from .scenarios import sample_demand, sample_lead_time
 
 @dataclass
 class PolicySchedule:
-    """(s, S) levels per product / material and week (arrays indexed by week), plus the
-    two extra parameters of variant B/C: a DC order cap per product and a minimum
-    physical stock (installation position) per raw material. Variant A ignores them."""
+    """(s, S) levels per product / material and week (arrays indexed by week), plus a
+    DC order cap per product and a minimum physical stock (installation position) per
+    raw material. All six are required: the policy always applies the cap and minimum."""
     dc_s: dict[str, np.ndarray]
     dc_S: dict[str, np.ndarray]
     rm_s: dict[str, np.ndarray]
     rm_S: dict[str, np.ndarray]
-    dc_cap: dict[str, int] = field(default_factory=dict)
-    rm_floor: dict[str, int] = field(default_factory=dict)
+    dc_cap: dict[str, int]
+    rm_floor: dict[str, int]
 
     def copy(self) -> "PolicySchedule":
         return PolicySchedule({k: v.copy() for k, v in self.dc_s.items()},
@@ -129,7 +129,7 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
             S_arr[t] = max(_round_up(np.quantile(need_S, q0), m.batch_size), s_arr[t] + m.batch_size)
         rm_s[m.name], rm_S[m.name] = s_arr, S_arr
 
-    # Starting values of the variant-B parameters (the search tunes them):
+    # Starting values of the order cap and RMW minimum (the search tunes them):
     #   DC cap   = initial_cap_weeks x mean weekly demand, rounded up to batches, at least the MOQ
     #   RMW floor = initial_floor_share x mean weekly RM use x median supplier lead time
     dc_cap, rm_floor = {}, {}
@@ -153,12 +153,12 @@ def _mean_weekly_demand(model: ModelInput, product: Product) -> float:
 # Decisions committed at this review (week 1)
 # ---------------------------------------------------------------------------
 def committed_decisions(model: ModelInput, schedule: PolicySchedule, result,
-                        rule_orders: dict | None = None, uses_cap_and_floor: bool = True) -> list[dict]:
+                        rule_orders: dict | None = None) -> list[dict]:
     """Week-1 decisions to execute now. The state at the start of week 1 is known, so
     these decisions are identical in every seed; this is checked here.
 
-    rule_orders (variant C): the quantities the (s,S) rule alone would have ordered,
-    shown next to the committed (lookahead) quantities."""
+    rule_orders: the quantities the (s,S) rule alone would have ordered, shown next to
+    the committed (lookahead) quantities. Without it the rule quantity is the committed one."""
     def same_in_all_seeds(arr, label):
         if len(np.unique(arr[:, 1])) != 1:
             raise RuntimeError(f"week-1 value '{label}' differs between seeds - state not deterministic")
@@ -176,7 +176,7 @@ def committed_decisions(model: ModelInput, schedule: PolicySchedule, result,
             "s (week 1)": int(schedule.dc_s[p.name][1]), "S (week 1)": int(schedule.dc_S[p.name][1]),
             "Rule quantity": rule_orders["dc"][p.name] if rule_orders else committed,
             "Committed quantity": committed,
-            "Note": f"order cap {schedule.dc_cap[p.name]}" if uses_cap_and_floor else "",
+            "Note": f"order cap {schedule.dc_cap[p.name]}",
         })
         released = same_in_all_seeds(dc["released_P"], "release")
         rows.append({
@@ -195,7 +195,7 @@ def committed_decisions(model: ModelInput, schedule: PolicySchedule, result,
         rm = result.rm[m.name]
         committed = same_in_all_seeds(rm["ordered_O"], "RM order")
         installation = same_in_all_seeds(rm["installation_position"], "RM installation position")
-        floor = schedule.rm_floor.get(m.name) if uses_cap_and_floor else None
+        floor = schedule.rm_floor[m.name]
         rows.append({
             "Decision": "Order RM from supplier (O)", "Item": m.name, "Location": "RMW",
             "Position": same_in_all_seeds(rm["echelon_position"], "RM echelon position"),
@@ -205,6 +205,6 @@ def committed_decisions(model: ModelInput, schedule: PolicySchedule, result,
             "s (week 1)": int(schedule.rm_s[m.name][1]), "S (week 1)": int(schedule.rm_S[m.name][1]),
             "Rule quantity": rule_orders["rm"][m.name] if rule_orders else committed,
             "Committed quantity": committed,
-            "Note": (f"physical RM position {installation} vs minimum {floor}" if floor is not None else ""),
+            "Note": f"physical RM position {installation} vs minimum {floor}",
         })
     return rows

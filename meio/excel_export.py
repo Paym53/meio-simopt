@@ -20,9 +20,9 @@ README_ROWS = [
      "1 ageing -> 2 receipts -> 3a DC order (s,S on DC position) -> 3b production release (capped by RM, "
      "capacity, batch/MOQ; rest cancelled) -> 3c RM transport RMW->PF -> 3d RM order (s,S on echelon "
      "position) -> 4 demand and allocation -> 5 fill recording -> 6 waste and holding cost."),
-    ("Policy variants", "A: plain (s,S). B: positions minus expected waste (median lead time window), DC order "
-                        "cap, minimum physical RM stock at the RMW. C: B + week-1 orders chosen by lookahead."),
-    ("DC inventory position", "FG on hand + FG released but not yet at the DC. Variant B/C use the effective "
+    ("Policy", "Age-aware (s,S): positions minus expected waste (median lead time window), DC order cap, "
+               "minimum physical RM stock at the RMW; the week-1 orders are chosen by lookahead."),
+    ("DC inventory position", "FG on hand + FG released but not yet at the DC. The rule uses the effective "
                               "position = inventory position - stock expected to expire before a new order arrives."),
     ("RMW echelon position", "RM on hand + RM on order + BOM x (FG on hand + FG in the pipeline)."),
     ("Allocation", "Oldest age first (FIFO). Within an age: channel with the tightest shelf-life requirement "
@@ -58,7 +58,7 @@ README_ROWS = [
     ("22_Trace_Orders", "Trace seeds: every order with lead-time draw, planned and actual (order-preserving) arrival."),
     ("23_Checks", "Unit balance checks over all test seeds (must all be 0)."),
     ("24_Search_Log", "Every accepted search step: phase, action, mean cost, feasibility."),
-    ("25_Lookahead", "Variant C only: every week-1 candidate quantity with its mean cost and feasibility."),
+    ("25_Lookahead", "Every week-1 candidate quantity with its mean cost and feasibility."),
 ]
 
 
