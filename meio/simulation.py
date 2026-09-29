@@ -66,6 +66,10 @@ class SimResult:
     fill: dict[tuple[str, str], np.ndarray]          # NaN where demand = 0
     cost_weekly: dict[str, np.ndarray]
     trace: Trace
+    # units-weighted average remaining shelf life of the stock at the end of each week
+    # (shelf life - age), per item; NaN where there is no stock. Float, so kept apart from dc/rm.
+    dc_remaining_life_end: dict[str, np.ndarray] = field(default_factory=dict)
+    rm_remaining_life_end: dict[str, np.ndarray] = field(default_factory=dict)
 
     def cost_per_seed(self) -> dict[str, np.ndarray]:
         return {name: arr.sum(axis=1) for name, arr in self.cost_weekly.items()}
@@ -203,6 +207,16 @@ def _mean_channel_demand(model: ModelInput, product: Product, week: int) -> list
     return [float(model.demand.mean[(product.name, c.name)][week]) for c in product.channels]
 
 
+def average_remaining_life(stock: np.ndarray, shelf_life: int) -> np.ndarray:
+    """Units-weighted mean of (shelf life - age) per seed; NaN for seeds without stock.
+    stock: (n_seeds, max_age + 1), column = age (column 0 unused)."""
+    units = stock[:, 1:].astype(float)
+    total = units.sum(axis=1)
+    remaining = shelf_life - np.arange(1, stock.shape[1])
+    weighted = (units * remaining).sum(axis=1)
+    return np.where(total > 0, weighted / np.maximum(total, 1.0), np.nan)
+
+
 def _age_row(prefix: dict, stock_row: np.ndarray) -> dict:
     row = dict(prefix)
     for age in range(1, len(stock_row)):
@@ -238,6 +252,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
     ch_rec = {(p.name, c.name): {s: zeros() for s in CHANNEL_SERIES} for p in products for c in p.channels}
     fill = {(p.name, c.name): np.full((n, H + 1), np.nan) for p in products for c in p.channels}
     cost = {name: np.zeros((n, H + 1)) for name in COST_COMPONENTS}
+    dc_life = {p.name: np.full((n, H + 1), np.nan) for p in products}
+    rm_life = {m.name: np.full((n, H + 1), np.nan) for m in materials}
 
     # --- state: stock by age (column = age), future arrivals by week (column = week) ---
     dc_stock, dc_arrivals, dc_last_arrival = {}, {}, {}
@@ -525,6 +541,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             stock[:, p.max_sellable_age] = 0
             dc_rec[p.name]["waste"][:, t] = waste
             dc_rec[p.name]["on_hand_end"][:, t] = stock[:, 1:].sum(axis=1)
+            dc_life[p.name][:, t] = average_remaining_life(stock, p.shelf_life)
             dc_rec[p.name]["pipeline_end"][:, t] = dc_arrivals[p.name][:, t + 1:].sum(axis=1)
             cost["FG waste"][:, t] += p.waste_cost * waste
             cost["FG holding"][:, t] += p.holding_cost * stock[:, 1:].sum(axis=1)
@@ -538,6 +555,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             stock[:, m.max_shippable_age] = 0
             rm_rec[m.name]["waste"][:, t] = waste
             rm_rec[m.name]["on_hand_end"][:, t] = stock[:, 1:].sum(axis=1)
+            rm_life[m.name][:, t] = average_remaining_life(stock, m.shelf_life)
             rm_rec[m.name]["pipeline_end"][:, t] = rm_arrivals[m.name][:, t + 1:].sum(axis=1)
             cost["RM waste"][:, t] += m.waste_cost * waste
             cost["RM holding"][:, t] += m.holding_cost * stock[:, 1:].sum(axis=1)
@@ -547,4 +565,4 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                                "stage": "end (after shipment + waste)"}, stock[s]))
     # =======================================================================
 
-    return SimResult(scen.name, n, H, dc_rec, rm_rec, ch_rec, fill, cost, trace)
+    return SimResult(scen.name, n, H, dc_rec, rm_rec, ch_rec, fill, cost, trace, dc_life, rm_life)

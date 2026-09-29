@@ -25,7 +25,8 @@ import urllib.request
 
 EXAMPLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples",
                        "example_input.json")
-SUMMARY_SECTIONS = {"run", "decisions_to_commit", "service", "costs", "kpis", "policy", "weekly_means_test_seeds"}
+SUMMARY_SECTIONS = {"run", "decisions_to_commit", "service", "costs", "kpis", "policy", "weekly_means_test_seeds",
+                    "meta", "weekly_bands", "baseline", "settings"}                      # last row: version 2
 
 
 def call(method: str, url: str, key: str | None, body: dict | None = None, timeout: int = 90):

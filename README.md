@@ -27,12 +27,12 @@ pip install -r requirements.txt
 
 python main.py --preset quick      # ~1-2 min, example input
 python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 49 tests
+python -m pytest -q                # 67 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:
 - `results.xlsx`: 25 sheets with inputs, policy, decisions, service per cell, costs, KPIs, and full traces (stock by age, flows, orders) for 3 seeds;
-- `summary.json`: the same results as plain JSON, meant for apps and APIs;
+- `summary.json`: the same results as plain JSON, meant for apps and APIs, including percentile bands per week over the test seeds and the heuristic baseline evaluated on the same seeds (format: [`docs/app_integration.md`](docs/app_integration.md));
 - `input.json`: the exact input used.
 
 ## Command-line options
@@ -58,7 +58,7 @@ python api.py                      # http://localhost:8000/docs (interactive)
 | Endpoint | Meaning |
 |---|---|
 | `GET /health` | Liveness probe |
-| `POST /runs?preset=quick` | Body = input JSON as in `examples/example_input.json`. Checks the input (422 with a message if it is invalid), queues the run and returns `run_id` |
+| `POST /runs?preset=quick` | Body = input JSON as in `examples/example_input.json`, or `{"input": ..., "settings": {...}}` to override calculation settings (limits in `docs/app_integration.md`). Checks both (422 with a message if invalid), queues the run and returns `run_id` |
 | `GET /runs/{run_id}` | `status`: queued, running, completed or failed; when completed also `summary` (= `summary.json`) |
 | `GET /runs/{run_id}/results.xlsx` | The Excel workbook of a completed run |
 
@@ -76,6 +76,7 @@ Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` 
    - **hold-out check**: raise the safety margin of cells the search over-fitted.
 3. **Lookahead.** Choose this week's orders by simulating candidates. The DC order goes first, then each RM order. A candidate may not fail any cell the rule's own quantity passes.
 4. **Final verdict.** Mean fill ≥ F for every (week × channel) cell after L_max, on the untouched test seeds, with no safety margin.
+5. **Baseline.** The heuristic start schedule is simulated on the same test seeds, so the report shows what the optimisation adds (cost and service).
 
 **Fill-rate rules.**
 - Search: `mean_fill − Z·SE − cell_margin ≥ F`, with Z = 2.

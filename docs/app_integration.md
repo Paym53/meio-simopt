@@ -38,13 +38,18 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 | `kpis` | Pooled fill rates, waste, cancellations, stock levels |
 | `policy` | Optimised s and S per week for the DC and the RMW, order cap, RMW minimums |
 | `weekly_means_test_seeds` | Mean flows, positions and costs per week |
+| `meta` *(v2)* | `summary_version` (2), `products`, `materials`, `channels` per product, `horizon`, `weeks`, `evaluation_weeks {first, last}`, `commit_week` (1) |
+| `weekly_bands` *(v2)* | One entry per weekly series: `{location: DC\|RMW\|channel\|cost, item, channel, metric, mean[], p5[], p25[], p50[], p75[], p95[]}` over the test seeds, index 0 = week 1 (`null` where no seed has a value). Same series as `weekly_means_test_seeds`, plus `avg_remaining_life_end` (units-weighted shelf life − age of the stock at the end of the week) for every DC and RMW item |
+| `service.cells` *(v2)* | Every cell: `product, channel, week, target_fill_rate, mean_fill, se, seeds_with_demand, pass` |
+| `baseline` *(v2)* | The heuristic start schedule of the search (same rule, quantile-based levels, initial cap and minimum), simulated on the same test seeds with the rule's own week-1 orders: `description, policy, mean_cost_over_horizon_test_seeds, test_cells_passing, costs, service_by_channel, kpis` |
+| `settings` *(v2)* | All calculation settings of the run (seed counts, `z`, margins, rounds, ...) |
 
 The detailed `results.xlsx` stays available as a download.
 
 ## 3. Next steps (in this order)
 
 1. **Web API in this repo (done: `api.py`, tests in `tests/test_api.py`).**
-   - `POST /runs?preset=quick|standard|full`: accepts an input JSON, checks it (422 with a message if invalid), queues a background job and returns `{run_id, status: "queued", preset, policy}`. Runs take 1–6 minutes, so the request does not wait for the result. Runs are executed one at a time.
+   - `POST /runs?preset=quick|standard|full`: accepts an input JSON, or `{"input": <input JSON>, "settings": {...}}` to override calculation settings of the preset, checks both (422 with a message if invalid), queues a background job and returns `{run_id, status: "queued", preset, policy, settings_overridden}`. Overridable settings and limits: `n_search_seeds` ≥ 50, `n_holdout_seeds` ≥ 100, `n_test_seeds` ≥ 500 (each at most the largest value among the allowed presets), `z` 0–5, `min_margin_bump` 0–0.1, `max_outer_rounds` 1–5, `max_improve_passes` 1–6, `step_fraction` 0.02–0.5, `lookahead_rm_steps` 0–8, `base_seed`. Runs take 1–6 minutes, so the request does not wait for the result. Runs are executed one at a time.
    - `GET /runs/{run_id}`: returns `{run_id, status, preset, summary, error}`; `status` is `queued`, `running`, `completed` or `failed`, and `summary` is `summary.json` once completed.
    - `GET /runs/{run_id}/results.xlsx`: the Excel download (404 until the run is completed).
    - `GET /health`: liveness probe.
@@ -55,5 +60,6 @@ The detailed `results.xlsx` stays available as a download.
    - Create it with Lovable Cloud or your own Supabase.
    - Store the API URL and key as Supabase secrets.
    - Let an edge function call the API, and store runs and results in Supabase tables.
+   - Prompts for building the app: [`lovable_app_prompt.md`](lovable_app_prompt.md).
    - Screens: input editor (products, channels, materials, forecast upload), run list, decisions of the week, service heat map (week × channel), cost breakdown, policy chart (s/S over time).
 4. **Later.** Scheduled weekly runs (rolling review), user accounts, comparison of scenarios.

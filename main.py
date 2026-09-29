@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from dataclasses import asdict
 from datetime import datetime
 
 import pandas as pd
@@ -32,12 +33,33 @@ from meio import report, service, tables
 from meio.config import (POLICY_NAME, PRESETS, ModelInput, SearchSettings, build_example_input, settings_for_preset,
                          validate_input)
 from meio.excel_export import write_workbook
-from meio.io_json import build_summary, load_model, model_to_dict, save_json
+from meio.io_json import (build_summary, load_model, model_to_dict, policy_dict, records, save_json,
+                          service_by_channel)
 from meio.lookahead import lookahead_week1
-from meio.policy import committed_decisions
-from meio.scenarios import build_scenarios
+from meio.policy import PolicySchedule, committed_decisions
+from meio.scenarios import ScenarioSet, build_scenarios
 from meio.search import Searcher
 from meio.simulation import simulate
+
+
+def evaluate_baseline(model: ModelInput, schedule: PolicySchedule, test_seeds: ScenarioSet) -> dict:
+    """The heuristic start schedule of the search (quantile-based (s,S), initial order cap and
+    RMW minimum), simulated on the same test seeds as the optimised schedule, with the rule's
+    own week-1 orders (no lookahead). Same policy rule, heuristic parameters: this shows what
+    the optimisation adds. Returns plain data for summary.json."""
+    result = simulate(model, schedule, test_seeds)
+    cells = service.final_verdict(service.cell_table(model, result)).rename(columns={"mean_fill": "test_mean_fill"})
+    return {
+        "description": "Heuristic start schedule of the search (demand quantiles over the lead time incl. "
+                       "safety via the quantile, one extra week of cover for S), same test seeds, "
+                       "week-1 orders from the rule (no lookahead)",
+        "policy": policy_dict(model, schedule),
+        "mean_cost_over_horizon_test_seeds": result.mean_total_cost(),
+        "test_cells_passing": f"{int(cells['test_pass'].sum())} / {len(cells)}",
+        "costs": records(tables.cost_table(result)),
+        "service_by_channel": service_by_channel(cells),
+        "kpis": records(tables.kpi_table(model, result)),
+    }
 
 
 def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: str = "") -> dict:
@@ -81,6 +103,7 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
     kpis = tables.kpi_table(model, test_result)
     checks = tables.conservation_checks(model, test_result)
     weekly = tables.weekly_means_table(model, test_result)
+    bands = tables.weekly_band_series(model, test_result)
     margins = pd.DataFrame([{"product": p, "channel": c, "week": w, "final_cell_margin": v}
                             for (p, c, w), v in sorted(outcome.margins.items())])
     holdout = pd.concat(outcome.holdout_rounds, ignore_index=True) if outcome.holdout_rounds else pd.DataFrame()
@@ -153,7 +176,15 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
     ]
     write_workbook(excel_path, sheets)
 
-    summary = build_summary(model, run_info, decisions, cells, costs, kpis, outcome.schedule, weekly)
+    # baseline on the same test seeds; the optimised result is released first to save memory
+    del test_result, tr, sheets
+    baseline = evaluate_baseline(model, outcome.start_schedule, test_seeds)
+    print(f"Baseline (heuristic start schedule, same test seeds): mean cost "
+          f"{baseline['mean_cost_over_horizon_test_seeds']:,.0f}, cells passing {baseline['test_cells_passing']}"
+          f"  |  optimised: {run_info['mean cost over horizon (test seeds)']:,.0f}, {run_info['test cells passing']}")
+
+    summary = build_summary(model, run_info, decisions, cells, costs, kpis, outcome.schedule, weekly,
+                            weekly_bands=bands, baseline=baseline, settings=asdict(settings))
     save_json(summary, os.path.join(run_dir, "summary.json"))
     print(f"Also written: {os.path.join(run_dir, 'summary.json')} and input.json")
     print(f"Total runtime: {time.time() - started:.1f} s")

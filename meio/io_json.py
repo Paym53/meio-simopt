@@ -5,6 +5,9 @@ JSON interface of the model.
           format a future app or web API sends to the model.
 * Output: every run writes summary.json - the committed decisions, service
           verdict, costs, KPIs and the optimised policy - in plain JSON.
+          Version 2 adds meta, weekly_bands (spread over the test seeds per week),
+          service.cells, baseline (heuristic start schedule on the same seeds) and
+          settings. Version-1 keys are unchanged (docs/app_integration.md).
 
 Run   python -m meio.io_json examples/example_input.json   to (re)create the example input.
 
@@ -174,39 +177,82 @@ def snake(text: str) -> str:
     return out.strip("_")
 
 
-def _records(df: pd.DataFrame, keys: dict | None = None) -> list[dict]:
+def records(df: pd.DataFrame, keys: dict | None = None) -> list[dict]:
     renamed = df.rename(columns=keys) if keys else df.rename(columns=snake)
     return to_jsonable(renamed.to_dict(orient="records"))
 
 
-def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, cells: pd.DataFrame,
-                  costs: pd.DataFrame, kpis: pd.DataFrame, schedule, weekly_means: pd.DataFrame) -> dict:
-    """The run result as plain data: what to do now, how good the plan is, and the policy.
-    All keys are snake_case so that an app or API can use them directly."""
-    service = []
+def service_by_channel(cells: pd.DataFrame) -> list[dict]:
+    """Per product and channel: cells passing on the test seeds and the worst week.
+    cells needs the columns product, channel, week, target_F, test_mean_fill, test_pass."""
+    rows = []
     for (p, c), g in cells.groupby(["product", "channel"], sort=False):
         worst = g.loc[g["test_mean_fill"].idxmin()]
-        service.append({"product": p, "channel": c, "target_fill_rate": float(g["target_F"].iloc[0]),
-                        "cells_evaluated": int(len(g)), "cells_passing": int(g["test_pass"].sum()),
-                        "worst_week": int(worst["week"]), "worst_week_mean_fill": float(worst["test_mean_fill"])})
-    failed = cells[~cells["test_pass"]][["product", "channel", "week", "target_F", "test_mean_fill", "test_se"]]
-    policy = {
+        rows.append({"product": p, "channel": c, "target_fill_rate": float(g["target_F"].iloc[0]),
+                     "cells_evaluated": int(len(g)), "cells_passing": int(g["test_pass"].sum()),
+                     "worst_week": int(worst["week"]), "worst_week_mean_fill": float(worst["test_mean_fill"])})
+    return rows
+
+
+def policy_dict(model: ModelInput, schedule) -> dict:
+    """s and S per week (index 0 = week 1), DC order cap and RMW minimum of a schedule."""
+    return {
         "weeks": list(range(1, model.horizon + 1)),
         "dc": {p.name: {"s": schedule.dc_s[p.name][1:], "S": schedule.dc_S[p.name][1:],
                         "order_cap": schedule.dc_cap.get(p.name)} for p in model.products},
         "rmw": {m.name: {"s": schedule.rm_s[m.name][1:], "S": schedule.rm_S[m.name][1:],
                          "minimum_physical_stock": schedule.rm_floor.get(m.name)} for m in model.materials},
     }
-    return to_jsonable({
+
+
+def meta_dict(model: ModelInput) -> dict:
+    """What the summary covers: items, channels, weeks, evaluation window, commit week."""
+    weeks = model.evaluation_weeks
+    return {
+        "summary_version": 2,
+        "products": [p.name for p in model.products],
+        "materials": [m.name for m in model.materials],
+        "channels": {p.name: [c.name for c in p.channels] for p in model.products},
+        "horizon": model.horizon,
+        "weeks": list(range(1, model.horizon + 1)),
+        "evaluation_weeks": {"first": weeks[0], "last": weeks[-1]} if weeks else None,
+        "commit_week": 1,
+    }
+
+
+def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, cells: pd.DataFrame,
+                  costs: pd.DataFrame, kpis: pd.DataFrame, schedule, weekly_means: pd.DataFrame,
+                  weekly_bands: list[dict] | None = None, baseline: dict | None = None,
+                  settings: dict | None = None) -> dict:
+    """The run result as plain data: what to do now, how good the plan is, and the policy.
+    All keys are snake_case so that an app or API can use them directly.
+
+    Version 2 adds (only when given): meta, weekly_bands, service.cells, baseline, settings.
+    The keys of version 1 are unchanged."""
+    failed = cells[~cells["test_pass"]][["product", "channel", "week", "target_F", "test_mean_fill", "test_se"]]
+    service = {"by_channel": service_by_channel(cells), "failed_cells": records(failed),
+               "all_cells_pass": bool(cells["test_pass"].all())}
+    summary = {
         "run": {snake(k): v for k, v in run_info.items()},
-        "decisions_to_commit": _records(decisions, DECISION_KEYS),
-        "service": {"by_channel": service, "failed_cells": _records(failed),
-                    "all_cells_pass": bool(cells["test_pass"].all())},
-        "costs": _records(costs),
-        "kpis": _records(kpis),
-        "policy": policy,
-        "weekly_means_test_seeds": _records(weekly_means),
-    })
+        "decisions_to_commit": records(decisions, DECISION_KEYS),
+        "service": service,
+        "costs": records(costs),
+        "kpis": records(kpis),
+        "policy": policy_dict(model, schedule),
+        "weekly_means_test_seeds": records(weekly_means),
+    }
+    if weekly_bands is not None:
+        summary["meta"] = meta_dict(model)
+        summary["weekly_bands"] = weekly_bands
+        service["cells"] = records(cells[["product", "channel", "week", "target_F", "test_mean_fill", "test_se",
+                                           "test_seeds_with_demand", "test_pass"]].rename(columns={
+            "target_F": "target_fill_rate", "test_mean_fill": "mean_fill", "test_se": "se",
+            "test_seeds_with_demand": "seeds_with_demand", "test_pass": "pass"}))
+    if baseline is not None:
+        summary["baseline"] = baseline
+    if settings is not None:
+        summary["settings"] = settings
+    return to_jsonable(summary)
 
 
 if __name__ == "__main__":
