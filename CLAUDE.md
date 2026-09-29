@@ -14,7 +14,7 @@ Simulation-optimisation model for a perishable two-echelon supply chain: supplie
 ## Commands
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                         # must pass before every commit (49+ tests)
+python -m pytest -q                         # must pass before every commit (67+ tests)
 python main.py --preset quick               # end-to-end check, ~1-2 min, writes output/run_*/
 python main.py --input examples/example_input.json --preset quick
 python api.py                               # web API on http://localhost:8000/docs (tests: tests/test_api.py)

@@ -6,8 +6,9 @@ Web API of the MEIO simulation-optimisation model (FastAPI), for the Lovable app
 
 Endpoints
     GET  /health                      liveness probe, never needs a key
-    POST /runs?preset=quick           body = input JSON (format: examples/example_input.json);
-                                      checks the input, queues the run, returns {run_id, status}
+    POST /runs?preset=quick           body = input JSON (format: examples/example_input.json), or
+                                      {"input": <input JSON>, "settings": {<overrides>}};
+                                      checks both, queues the run, returns {run_id, status}
     GET  /runs/{run_id}               status "queued" | "running" | "completed" | "failed";
                                       when completed also the summary (same as summary.json)
     GET  /runs/{run_id}/results.xlsx  the Excel workbook of a completed run
@@ -39,7 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from main import run
-from meio.config import POLICY_NAME, PRESETS, ModelInput, settings_for_preset, validate_input
+from meio.config import POLICY_NAME, PRESETS, ModelInput, SearchSettings, settings_for_preset, validate_input
 from meio.io_json import model_from_dict
 
 OUTPUT_DIR = os.path.abspath(os.environ.get("MEIO_OUTPUT_DIR", "output"))
@@ -83,6 +84,55 @@ def allowed_presets() -> list[str]:
     return [p for p in PRESETS if not configured or p in configured]
 
 
+# Calculation settings a client may override: name -> (type, minimum, maximum).
+# None as maximum = the largest value among the presets this deployment allows (memory bound).
+SETTING_LIMITS = {
+    "n_search_seeds": (int, 50, None),
+    "n_holdout_seeds": (int, 100, None),
+    "n_test_seeds": (int, 500, None),
+    "z": (float, 0.0, 5.0),
+    "min_margin_bump": (float, 0.0, 0.1),
+    "max_outer_rounds": (int, 1, 5),
+    "max_improve_passes": (int, 1, 6),
+    "step_fraction": (float, 0.02, 0.5),
+    "lookahead_rm_steps": (int, 0, 8),
+    "base_seed": (int, 0, 2**31 - 1),
+}
+SEED_PRESET_INDEX = {"n_search_seeds": 0, "n_holdout_seeds": 1, "n_test_seeds": 2}   # position in PRESETS
+
+
+def setting_limits() -> dict[str, tuple]:
+    """SETTING_LIMITS with the seed maxima taken from the allowed presets."""
+    limits = dict(SETTING_LIMITS)
+    for name, index in SEED_PRESET_INDEX.items():
+        kind, low, _ = limits[name]
+        limits[name] = (kind, low, max(PRESETS[p][index] for p in allowed_presets()))
+    return limits
+
+
+def parse_settings(preset: str, overrides: Any) -> SearchSettings:
+    """The preset's settings with the client's overrides applied. Unknown names, wrong types
+    and values outside the limits raise HTTP 422."""
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict):
+        raise HTTPException(status_code=422, detail="settings must be an object")
+    limits, problems = setting_limits(), []
+    for name, value in overrides.items():
+        if name not in limits:
+            problems.append(f"unknown setting '{name}' (allowed: {sorted(limits)})")
+            continue
+        kind, low, high = limits[name]
+        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not numeric or (kind is int and not float(value).is_integer()):
+            problems.append(f"{name} must be {'an integer' if kind is int else 'a number'}")
+        elif not low <= value <= high:
+            problems.append(f"{name} must be between {low} and {high}")
+    if problems:
+        raise HTTPException(status_code=422, detail="invalid settings: " + "; ".join(problems))
+    return settings_for_preset(preset, **{k: limits[k][0](v) for k, v in overrides.items()})
+
+
 def parse_input(payload: dict) -> ModelInput:
     """Build and check the model from the request body. Raises HTTP 422 with a clear message."""
     try:
@@ -94,12 +144,12 @@ def parse_input(payload: dict) -> ModelInput:
     return model
 
 
-def execute_run(run_id: str, model: ModelInput, preset: str) -> None:
+def execute_run(run_id: str, model: ModelInput, settings: SearchSettings, preset: str) -> None:
     """Background worker: wait for the run slot, run one review, record the outcome."""
     with RUN_SLOT:
         set_job(run_id, status="running")
         try:
-            summary = run(model, settings_for_preset(preset), run_folder(run_id), preset_name=preset)
+            summary = run(model, settings, run_folder(run_id), preset_name=preset)
             set_job(run_id, status="completed", summary=summary)
         except Exception as exc:          # report every failure to the client instead of losing it
             set_job(run_id, status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -114,15 +164,22 @@ def health() -> dict:
 @app.post("/runs", dependencies=[Depends(require_api_key)])
 def create_run(payload: dict[str, Any], background_tasks: BackgroundTasks,
                preset: str = Query("quick", description=f"one of {list(PRESETS)} (if allowed)")) -> dict:
-    """Check the input, queue the run and return at once with its run_id."""
+    """Check the input and settings, queue the run and return at once with its run_id.
+    The body is either the input JSON itself or {"input": ..., "settings": {...}}."""
     if preset not in allowed_presets():
         raise HTTPException(status_code=422, detail=f"unknown or disabled preset '{preset}', "
                                                     f"choose from {allowed_presets()}")
-    model = parse_input(payload)
+    wrapped = "input" in payload
+    if wrapped and (not isinstance(payload["input"], dict) or set(payload) - {"input", "settings"}):
+        raise HTTPException(status_code=422, detail='a wrapped body has only "input" (object) and "settings"')
+    overrides = payload.get("settings") if wrapped else None
+    settings = parse_settings(preset, overrides)
+    model = parse_input(payload["input"] if wrapped else payload)
     run_id = uuid.uuid4().hex[:12]
     set_job(run_id, status="queued", preset=preset, summary=None, error=None)
-    background_tasks.add_task(execute_run, run_id, model, preset)
-    return {"run_id": run_id, "status": "queued", "preset": preset, "policy": POLICY_NAME}
+    background_tasks.add_task(execute_run, run_id, model, settings, preset)
+    return {"run_id": run_id, "status": "queued", "preset": preset, "policy": POLICY_NAME,
+            "settings_overridden": overrides or {}}
 
 
 def summary_on_disk(run_id: str) -> dict | None:

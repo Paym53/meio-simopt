@@ -319,6 +319,20 @@ def test_rm_echelon_position_subtracts_raw_material_expected_to_expire():
     assert rm["ordered_O"][0, 1] == 100
 
 
+def test_average_remaining_shelf_life_at_end_of_week():
+    """DC: 30 units age 2 and 10 units age 4, shelf life 6, no demand, no orders.
+    End W1: (30*4 + 10*2) / 40 = 3.5. W2: ages 3 and 5 -> age 5 is scrapped -> 30 units, 3.0.
+    W4: the last units reach age 5 and are scrapped -> no stock -> NaN.
+    RMW A: 500 units age 1, shelf life 10, nothing shipped -> 9 in W1."""
+    model = _tiny_model(stock_b=500)
+    model.initial_state.dc_stock["F"] = {2: 30, 4: 10}
+    r = simulate(model, _tiny_schedule(model, dc_level=0), build_scenarios(model, 2, 1, "t"))
+    life = r.dc_remaining_life_end["F"]
+    assert life[0, 1] == 3.5 and life[0, 2] == 3.0 and life[0, 3] == 2.0 and np.isnan(life[0, 4])
+    assert r.dc["F"]["waste"][0, 2] == 10 and r.dc["F"]["waste"][0, 4] == 30
+    assert r.rm_remaining_life_end["A"][0, 1] == 9
+
+
 def test_schedule_without_order_cap_or_rmw_minimum_is_rejected():
     """The policy always applies the cap and the minimum, so a schedule must carry both."""
     levels = {"F": np.zeros(7)}

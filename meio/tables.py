@@ -6,6 +6,8 @@ checked in tests, or written to Excel.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -248,6 +250,49 @@ def weekly_means_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
     for name, arr in result.cost_weekly.items():
         data[f"cost {name}"] = arr[:, 1:].mean(axis=0)
     return pd.DataFrame(data).round(3)
+
+
+BAND_PERCENTILES = (5, 25, 50, 75, 95)
+
+
+def _band(values: np.ndarray) -> dict:
+    """Mean and percentiles over the seeds (axis 0) per week, for weeks 1..H.
+    NaN entries (e.g. no stock) are ignored; a week with no value at all gives None."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)   # all-NaN weeks
+        mean = np.nanmean(values, axis=0)
+        pct = np.nanpercentile(values, BAND_PERCENTILES, axis=0)
+    band = {"mean": np.round(mean, 3)}
+    for q, row in zip(BAND_PERCENTILES, pct):
+        band[f"p{q}"] = np.round(row, 3)
+    return band
+
+
+def weekly_band_series(model: ModelInput, result: SimResult) -> list[dict]:
+    """Spread of every weekly series over the seeds: one entry per series with arrays
+    mean, p5, p25, p50, p75, p95 (index 0 = week 1). Same series as weekly_means_table,
+    plus the average remaining shelf life of the stock at the end of the week."""
+    def entry(location, item, channel, metric, arr):
+        return {"location": location, "item": item, "channel": channel, "metric": metric,
+                **_band(arr[:, 1:].astype(float))}
+
+    series = []
+    for p in model.products:
+        for s in DC_SERIES:
+            series.append(entry("DC", p.name, None, s.lower(), result.dc[p.name][s]))
+        if p.name in result.dc_remaining_life_end:
+            series.append(entry("DC", p.name, None, "avg_remaining_life_end", result.dc_remaining_life_end[p.name]))
+        for c in p.channels:
+            for s in CHANNEL_SERIES:
+                series.append(entry("channel", p.name, c.name, s, result.channel[(p.name, c.name)][s]))
+    for m in model.materials:
+        for s in RM_SERIES:
+            series.append(entry("RMW", m.name, None, s.lower(), result.rm[m.name][s]))
+        if m.name in result.rm_remaining_life_end:
+            series.append(entry("RMW", m.name, None, "avg_remaining_life_end", result.rm_remaining_life_end[m.name]))
+    for name, arr in result.cost_weekly.items():
+        series.append(entry("cost", None, None, name.lower().replace(" ", "_").replace("->", "_"), arr))
+    return series
 
 
 def trace_weekly_table(model: ModelInput, schedule: PolicySchedule, result: SimResult,

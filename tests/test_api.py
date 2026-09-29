@@ -158,3 +158,45 @@ def test_presets_can_be_limited_per_deployment(client, monkeypatch):
     assert client.post("/runs?preset=standard", json=EXAMPLE).status_code == 200
     monkeypatch.delenv("MEIO_ALLOWED_PRESETS")
     assert client.post("/runs?preset=full", json=EXAMPLE).status_code == 200
+
+
+def test_settings_can_be_sent_with_the_input(client):
+    body = {"input": EXAMPLE, "settings": {"z": 1.5, "n_test_seeds": 1000, "max_outer_rounds": 1}}
+    r = client.post("/runs?preset=standard", json=body)
+    assert r.status_code == 200 and r.json()["settings_overridden"] == body["settings"]
+    _, settings, _, preset = client.calls[0]
+    assert (settings.z, settings.n_test_seeds, settings.max_outer_rounds) == (1.5, 1000, 1)
+    assert settings.n_search_seeds == 300 and preset == "standard"       # rest from the preset
+
+
+def test_plain_input_body_still_uses_the_preset_settings(client):
+    client.post("/runs?preset=quick", json=EXAMPLE)
+    settings = client.calls[0][1]
+    assert (settings.n_search_seeds, settings.n_test_seeds, settings.z) == (200, 2000, 2.0)
+
+
+@pytest.mark.parametrize("settings, fragment", [
+    ({"foo": 1}, "unknown setting 'foo'"),
+    ({"z": "high"}, "z must be a number"),
+    ({"z": True}, "z must be a number"),
+    ({"max_outer_rounds": 1.5}, "must be an integer"),
+    ({"z": 9}, "z must be between"),
+    ({"n_test_seeds": 10}, "n_test_seeds must be between"),
+    ([1, 2], "settings must be an object"),
+])
+def test_invalid_settings_are_rejected(client, settings, fragment):
+    r = client.post("/runs", json={"input": EXAMPLE, "settings": settings})
+    assert r.status_code == 422 and fragment in r.json()["detail"] and client.calls == []
+
+
+def test_seed_counts_are_capped_by_the_allowed_presets(client, monkeypatch):
+    monkeypatch.setenv("MEIO_ALLOWED_PRESETS", "quick,standard")
+    r = client.post("/runs", json={"input": EXAMPLE, "settings": {"n_test_seeds": 10000}})
+    assert r.status_code == 422 and "between 500 and 5000" in r.json()["detail"]
+    assert client.post("/runs", json={"input": EXAMPLE, "settings": {"n_test_seeds": 5000}}).status_code == 200
+
+
+def test_wrapped_body_with_extra_keys_or_bad_input_is_rejected(client):
+    assert client.post("/runs", json={"input": EXAMPLE, "other": 1}).status_code == 422
+    assert client.post("/runs", json={"input": [1]}).status_code == 422
+    assert client.calls == []
