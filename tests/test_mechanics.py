@@ -13,8 +13,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from meio import service
-from meio.config import (VARIANT_A, VARIANT_B, Channel, InitialState, Material, ModelInput, Product,
-                         SearchSettings, Tier, build_example_input, median_of)
+from meio.config import (Channel, InitialState, Material, ModelInput, Product, SearchSettings, Tier,
+                         build_example_input, median_of)
 from meio.policy import PolicySchedule, initial_schedule
 from meio.scenarios import build_scenarios
 from meio.simulation import (allocate_demand, projected_fg_waste, projected_rm_waste,
@@ -183,7 +183,8 @@ def test_release_is_cut_by_the_short_material_and_rounded_to_supply_rules():
     H = model.horizon
     sched = PolicySchedule(dc_s={"F": np.full(H + 1, 100)}, dc_S={"F": np.full(H + 1, 100)},
                            rm_s={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
-                           rm_S={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)})
+                           rm_S={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
+                           dc_cap={"F": 1000}, rm_floor={"A": 0, "B": 0})
     r = simulate(model, sched, build_scenarios(model, 3, 1, "t"))
     dc = r.dc["F"]
     assert dc["ordered_Q"][0, 1] == 100
@@ -221,7 +222,7 @@ def test_fill_rate_rules():
 
 
 # ---------------------------------------------------------------------------
-# Policy variants B / C
+# Ordering policy: expected waste, order cap, RMW minimum, lookahead
 # ---------------------------------------------------------------------------
 def test_median_lead_time():
     assert median_of({5: 0.20, 6: 0.55, 7: 0.20, 8: 0.05}) == 6
@@ -271,48 +272,99 @@ def _tiny_schedule(model, dc_level=100, rm_level=0, cap=1000, floor=0):
                           dc_cap={"F": cap}, rm_floor={"A": floor, "B": floor})
 
 
-def test_order_cap_limits_dc_order_in_variant_b_only():
+def test_order_cap_limits_the_dc_order():
+    """The rule asks for 100. A cap of 40 cuts the order to 40; a cap of 1000 does not bind."""
     model = _tiny_model(stock_b=500)
     seeds = build_scenarios(model, 2, 1, "t")
-    a = simulate(model, _tiny_schedule(model, cap=40), seeds, variant=VARIANT_A)
-    b = simulate(model, _tiny_schedule(model, cap=40), seeds, variant=VARIANT_B)
-    assert a.dc["F"]["ordered_Q"][0, 1] == 100
-    assert b.dc["F"]["ordered_Q"][0, 1] == 40 and b.dc["F"]["cut_by_policy_cap"][0, 1] == 1
+    loose = simulate(model, _tiny_schedule(model, cap=1000), seeds)
+    tight = simulate(model, _tiny_schedule(model, cap=40), seeds)
+    assert loose.dc["F"]["ordered_Q"][0, 1] == 100 and loose.dc["F"]["cut_by_policy_cap"][0, 1] == 0
+    assert tight.dc["F"]["ordered_Q"][0, 1] == 40 and tight.dc["F"]["cut_by_policy_cap"][0, 1] == 1
 
 
-def test_rmw_minimum_triggers_an_order_in_variant_b_only():
-    """B has 57 units; the week-1 release uses 50 -> 7 left. With a minimum of 200 the RMW
-    orders 200 - 7 = 193 -> rounded up to 200. Variant A ignores the minimum."""
+def test_rmw_minimum_triggers_an_order():
+    """B has 57 units; the week-1 release uses 50 -> 7 left. The (s,S) levels are 0, so only
+    the minimum can trigger: with 200 the RMW orders 200 - 7 = 193 -> rounded up to 200;
+    with 0 it orders nothing."""
     model = _tiny_model(stock_b=57)
     seeds = build_scenarios(model, 2, 1, "t")
-    a = simulate(model, _tiny_schedule(model, floor=200), seeds, variant=VARIANT_A)
-    b = simulate(model, _tiny_schedule(model, floor=200), seeds, variant=VARIANT_B)
-    assert a.rm["B"]["ordered_O"][0, 1] == 0
-    assert b.rm["B"]["installation_position"][0, 1] == 7
-    assert b.rm["B"]["floor_triggered"][0, 1] == 1 and b.rm["B"]["ordered_O"][0, 1] == 200
+    none = simulate(model, _tiny_schedule(model, floor=0), seeds)
+    some = simulate(model, _tiny_schedule(model, floor=200), seeds)
+    assert none.rm["B"]["floor_triggered"][0, 1] == 0 and none.rm["B"]["ordered_O"][0, 1] == 0
+    assert some.rm["B"]["installation_position"][0, 1] == 7
+    assert some.rm["B"]["floor_triggered"][0, 1] == 1 and some.rm["B"]["ordered_O"][0, 1] == 200
+
+
+def test_dc_position_subtracts_stock_expected_to_expire():
+    """50 units of age 5 at the DC (oldest sellable age 5, no demand) all expire before a new
+    order arrives. The rule therefore sees an effective position of 0 and orders up to
+    S = 100, not 100 - 50 = 50 as a rule on the plain position would."""
+    model = _tiny_model(stock_b=500)
+    model.initial_state.dc_stock["F"] = {5: 50}
+    r = simulate(model, _tiny_schedule(model), build_scenarios(model, 2, 1, "t"))
+    dc = r.dc["F"]
+    assert dc["inventory_position"][0, 1] == 50 and dc["expected_waste"][0, 1] == 50
+    assert dc["effective_position"][0, 1] == 0 and dc["ordered_Q"][0, 1] == 100
+
+
+def test_rm_echelon_position_subtracts_raw_material_expected_to_expire():
+    """100 units of A at age 9 (oldest shippable age 9) with no RM use expire before a new
+    supplier order arrives. The effective echelon position is 0 < s = 100, so the RMW orders
+    100; a rule on the plain echelon position (100, not below s) would order nothing."""
+    model = _tiny_model(stock_b=500)
+    model.initial_state.rm_stock["A"] = {9: 100}
+    r = simulate(model, _tiny_schedule(model, dc_level=0, rm_level=100), build_scenarios(model, 2, 1, "t"))
+    rm = r.rm["A"]
+    assert rm["echelon_position"][0, 1] == 100 and rm["effective_echelon_position"][0, 1] == 0
+    assert rm["ordered_O"][0, 1] == 100
+
+
+def test_schedule_without_order_cap_or_rmw_minimum_is_rejected():
+    """The policy always applies the cap and the minimum, so a schedule must carry both."""
+    levels = {"F": np.zeros(7)}
+    for missing in ("dc_cap", "rm_floor"):
+        parts = dict(dc_s=levels, dc_S=levels, rm_s=levels, rm_S=levels, dc_cap={"F": 10}, rm_floor={"A": 0})
+        del parts[missing]
+        try:
+            PolicySchedule(**parts)
+        except TypeError:
+            continue
+        raise AssertionError(f"PolicySchedule accepted a schedule without {missing}")
+
+
+def test_only_one_policy_exists_in_the_code():
+    """Fitness function: no policy variants, variant switches or benchmark script may come back."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    forbidden = re.compile(r"PolicyVariant|VARIANT_?[ABCS]?\b|--variant|\bvariant\b", re.IGNORECASE)
+    sources = [os.path.join(root, f) for f in ("main.py", "rolling_demo.py", "api.py")]
+    sources += [os.path.join(root, "meio", f) for f in os.listdir(os.path.join(root, "meio")) if f.endswith(".py")]
+    for path in sources:
+        with open(path, encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, 1):
+                assert not forbidden.search(line), f"{os.path.relpath(path, root)}:{line_no}: {line.strip()}"
+    assert not os.path.exists(os.path.join(root, "compare_policies.py"))
 
 
 def test_week1_override_with_the_rules_own_orders_changes_nothing():
     model = build_example_input()
     schedule = initial_schedule(model, SearchSettings(n_quantile_samples=1000))
     seeds = build_scenarios(model, 100, 5, "t")
-    for variant in (VARIANT_A, VARIANT_B):
-        plain = simulate(model, schedule, seeds, variant=variant)
-        orders = {"dc": {"FG1": int(plain.dc["FG1"]["ordered_Q"][0, 1])},
-                  "rm": {m.name: int(plain.rm[m.name]["ordered_O"][0, 1]) for m in model.materials}}
-        forced = simulate(model, schedule, seeds, variant=variant, week1_orders=orders)
-        assert np.array_equal(plain.total_cost_per_seed(), forced.total_cost_per_seed())
-        assert np.array_equal(plain.dc["FG1"]["on_hand_end"], forced.dc["FG1"]["on_hand_end"])
+    plain = simulate(model, schedule, seeds)
+    orders = {"dc": {"FG1": int(plain.dc["FG1"]["ordered_Q"][0, 1])},
+              "rm": {m.name: int(plain.rm[m.name]["ordered_O"][0, 1]) for m in model.materials}}
+    forced = simulate(model, schedule, seeds, week1_orders=orders)
+    assert np.array_equal(plain.total_cost_per_seed(), forced.total_cost_per_seed())
+    assert np.array_equal(plain.dc["FG1"]["on_hand_end"], forced.dc["FG1"]["on_hand_end"])
 
 
 def test_lookahead_never_costlier_and_never_worse_in_service_than_the_rule():
-    from meio.config import VARIANT_C
     from meio.lookahead import lookahead_week1
     model = build_example_input()
     settings = SearchSettings(n_quantile_samples=1000)
     schedule = initial_schedule(model, settings)
     seeds = build_scenarios(model, 60, 9, "la")
-    orders, rule_orders, log = lookahead_week1(model, schedule, VARIANT_C, seeds, settings, {}, set())
+    orders, rule_orders, log = lookahead_week1(model, schedule, seeds, settings, {}, set())
     for (step, item), grp in log.groupby(["step", "item"]):
         chosen = grp[grp["chosen"]].iloc[0]
         rule = grp[grp["is_rule_quantity"]].iloc[0]
@@ -329,8 +381,8 @@ def test_json_round_trip_gives_identical_simulation():
     model = build_example_input()
     again = model_from_dict(json.loads(json.dumps(model_to_dict(model))))
     schedule = initial_schedule(model, SearchSettings(n_quantile_samples=500))
-    a = simulate(model, schedule, build_scenarios(model, 50, 3, "t"), variant=VARIANT_B)
-    b = simulate(again, schedule, build_scenarios(again, 50, 3, "t"), variant=VARIANT_B)
+    a = simulate(model, schedule, build_scenarios(model, 50, 3, "t"))
+    b = simulate(again, schedule, build_scenarios(again, 50, 3, "t"))
     assert np.array_equal(a.total_cost_per_seed(), b.total_cost_per_seed())
 
 

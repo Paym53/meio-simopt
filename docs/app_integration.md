@@ -1,6 +1,6 @@
 # Plan: from this engine to a Lovable app
 
-*This document describes how the Python engine in this repository can later become the backend of an app whose interface is built with Lovable. Nothing here is implemented yet, except the JSON input/output contract.*
+*This document describes how the Python engine in this repository becomes the backend of an app whose interface is built with Lovable. Implemented: the JSON input/output contract and the web API (`api.py`, step 1 below).*
 
 ## 1. Why two repositories
 
@@ -43,11 +43,14 @@ The detailed `results.xlsx` stays available as a download.
 
 ## 3. Next steps (in this order)
 
-1. **Web API in this repo.** For example FastAPI with an `api/` folder.
-   - `POST /runs`: accepts an input JSON and a preset, starts a background job and returns a `run_id`. Runs take 1–6 minutes, so the request must not wait for the result.
-   - `GET /runs/{run_id}`: returns the status and, when finished, `summary.json`.
-   - `GET /runs/{run_id}/results.xlsx`: the Excel download.
-2. **Hosting.** Any service that runs a Python container (for example Render, Railway, Fly.io or Google Cloud Run). Protect the API with a key.
+1. **Web API in this repo (done: `api.py`, tests in `tests/test_api.py`).**
+   - `POST /runs?preset=quick|standard|full`: accepts an input JSON, checks it (422 with a message if invalid), queues a background job and returns `{run_id, status: "queued", preset, policy}`. Runs take 1–6 minutes, so the request does not wait for the result. Runs are executed one at a time.
+   - `GET /runs/{run_id}`: returns `{run_id, status, preset, summary, error}`; `status` is `queued`, `running`, `completed` or `failed`, and `summary` is `summary.json` once completed.
+   - `GET /runs/{run_id}/results.xlsx`: the Excel download (404 until the run is completed).
+   - `GET /health`: liveness probe.
+   - Key: set `MEIO_API_KEY` on the host; every endpoint except `/health` then needs the header `X-API-Key`. `MEIO_CORS_ORIGINS` limits browser origins (default `*`).
+   - The job registry is in memory and run folders are on the instance disk: after a restart, finished runs are still found if their folder survived; on a free Render instance it does not.
+2. **Hosting.** Render web service defined in `render.yaml`; runbook: [`deployment_render.md`](deployment_render.md). Set `MEIO_API_KEY` as an environment variable and store the same key as a Supabase secret, so only the edge function (not the browser) sends it.
 3. **Lovable project.**
    - Create it with Lovable Cloud or your own Supabase.
    - Store the API URL and key as Supabase secrets.

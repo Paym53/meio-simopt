@@ -1,5 +1,5 @@
 > **Status note (27 Sep 2026).** This is the design specification the prototype was built from.
-> Since then the ordering policy has been extended: the model now uses **policy variant C**, an age-aware
+> Since then the ordering policy has been extended: the model now uses a single policy, an age-aware
 > (s,S) rule with a DC order cap and a minimum physical stock at the RMW, plus a week-1 lookahead that
 > chooses the committed orders by simulation. See `docs/policy_choice.md` and the README. Sections 5,
 > 8 (steps 3a and 3d) and 12 are therefore superseded where they describe the plain (s,S) rule.

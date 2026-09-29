@@ -14,7 +14,7 @@ Every week (review period 1 week) the model decides:
 
 Demand is given as non-stationary forecast distributions per week and channel. Lead times are random and order-preserving. Unmet demand is lost. Each channel has a minimum remaining shelf life and a per-week fill-rate target.
 
-**Main policy (variant C).** An age-aware (s,S) rule with a DC order cap and a minimum physical RM stock, tuned by simulation-optimisation, plus a **week-1 lookahead** that chooses the orders committed now by simulating candidate quantities from the current state. Why this policy: see [`docs/policy_choice.md`](docs/policy_choice.md).
+**Ordering policy.** The model uses one policy: an age-aware (s,S) rule with a DC order cap and a minimum physical RM stock, tuned by simulation-optimisation, plus a **week-1 lookahead** that chooses the orders committed now by simulating candidate quantities from the current state. Why this policy: see [`docs/policy_choice.md`](docs/policy_choice.md).
 
 ## Quick start
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 python main.py --preset quick      # ~1-2 min, example input
 python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 23 tests
+python -m pytest -q                # 49 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:
@@ -41,13 +41,30 @@ Each run creates a folder `output/run_<timestamp>/` containing:
 |---|---|
 | `--input file.json` | Your own input (format: `examples/example_input.json`, described in `meio/io_json.py`) |
 | `--preset quick\|standard\|full` | Seed counts and search effort (200/400/2,000 … 500/1,000/10,000 seeds) |
-| `--variant C\|B\|A` | C = main policy; B without lookahead; A = plain (s,S) (benchmarks) |
 | `--out-dir`, `--name` | Where the run folder is written |
 
 Other scripts:
-- `python compare_policies.py`: compares A/B/C on 6 configurations (about 25 min on 2 cores).
 - `python rolling_demo.py`: 3 consecutive weekly reviews with state updates.
 - `python -m meio.io_json examples/example_input.json`: writes the example input.
+
+## Web API
+
+`api.py` wraps a run in a small FastAPI service for the Lovable app (plan: [`docs/app_integration.md`](docs/app_integration.md)).
+
+```bash
+python api.py                      # http://localhost:8000/docs (interactive)
+```
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /health` | Liveness probe |
+| `POST /runs?preset=quick` | Body = input JSON as in `examples/example_input.json`. Checks the input (422 with a message if it is invalid), queues the run and returns `run_id` |
+| `GET /runs/{run_id}` | `status`: queued, running, completed or failed; when completed also `summary` (= `summary.json`) |
+| `GET /runs/{run_id}/results.xlsx` | The Excel workbook of a completed run |
+
+Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` (then every endpoint except `/health` needs the header `X-API-Key`), `MEIO_ALLOWED_PRESETS` (comma-separated, default all), `MEIO_CORS_ORIGINS` (comma-separated, default `*`), `MEIO_OUTPUT_DIR` (default `output`).
+
+**Hosting on Render.** Defined as code in [`render.yaml`](render.yaml); step-by-step runbook in [`docs/deployment_render.md`](docs/deployment_render.md). After deploying, check it with `python scripts/smoke_test.py https://<service>.onrender.com --key <key>`.
 
 ## How a run works
 
@@ -84,31 +101,36 @@ The full specification is in [`docs/model_specification_v5.md`](docs/model_speci
 
 ```
 CLAUDE.md                  instructions for Claude Code (commands, conventions, workflow)
-main.py                    one review (default: policy C, preset standard)
-compare_policies.py        policy comparison A/B/C
+main.py                    one review (default: preset standard)
+api.py                     web API (FastAPI) around main.run
+render.yaml                Render deployment (Blueprint)
+scripts/smoke_test.py      checks a deployed API end to end
 rolling_demo.py            consecutive weekly reviews
 meio/
-  config.py                input dataclasses, policy variants, presets, example instance
+  config.py                input dataclasses, policy name, presets, example instance
   io_json.py               JSON input/output (the app contract)
   scenarios.py             random futures: demand and lead times
   simulation.py            weekly simulation (steps 1-6), expected-waste projections
   policy.py                (s,S) schedule, order weeks, start schedule, committed decisions
   search.py                repair -> improve -> hold-out search
-  lookahead.py             week-1 lookahead (policy C)
+  lookahead.py             week-1 lookahead
   service.py               fill-rate cells and the three rules
   rolling.py               state update between reviews
   tables.py, report.py, excel_export.py   output
 tests/test_mechanics.py    unit tests (conservation, FIFO, arrivals, rules, JSON)
+tests/test_api.py          web API tests (input checks, run lifecycle, API key)
+tests/test_deployment.py   render.yaml consistent with api.py and CI
 examples/                  example_input.json (input format) and example_summary.json (output of a quick run)
 docs/                      specification, policy choice, app integration plan
 ```
 
 ## Status and roadmap
 
-- ✅ Running model with policy C, Excel and JSON output, tests and CI.
+- ✅ Running model with the age-aware capped (s,S) + lookahead policy, Excel and JSON output, tests and CI.
 - ⏭ Search algorithm: multi-start, parameter reduction, better optimiser. Currently the start point changes results by up to 18 %.
 - ⏭ Several finished goods sharing raw materials; realistic holding costs (value × rate + storage).
-- ⏭ Web API and Lovable frontend: see [`docs/app_integration.md`](docs/app_integration.md).
+- ✅ Web API (`api.py`) with Render Blueprint (`render.yaml`).
+- ⏭ Lovable frontend: see [`docs/app_integration.md`](docs/app_integration.md).
 
 ## Main limitations
 

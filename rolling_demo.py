@@ -4,7 +4,7 @@ Rolling-horizon demonstration: re-optimise at every review week.
     python rolling_demo.py              3 review weeks with small seed sets
     python rolling_demo.py --weeks 5
 
-Policy: variant C (age-aware capped (s,S) + week-1 lookahead), the main policy of the model.
+Policy: age-aware capped (s,S) + week-1 lookahead, the ordering policy of the model.
 
 Each review:  tune the rule -> choose week-1 orders by lookahead -> commit -> one "real" week happens
 (simulated with an independent reality seed) -> read the new state -> shift one week.
@@ -17,7 +17,7 @@ import os
 
 import pandas as pd
 
-from meio.config import VARIANT_C, build_example_input, settings_for_preset, validate_input
+from meio.config import build_example_input, settings_for_preset, validate_input
 from meio.excel_export import write_workbook
 from meio.lookahead import lookahead_week1
 from meio.policy import committed_decisions
@@ -46,14 +46,13 @@ def main() -> None:
 
         search = build_scenarios(model, settings.n_search_seeds, settings.base_seed + 1 + 100 * review, "search")
         holdout = build_scenarios(model, settings.n_holdout_seeds, settings.base_seed + 2 + 100 * review, "hold-out")
-        outcome = Searcher(model, settings, search, holdout, start_schedule=warm_start, variant=VARIANT_C).run()
-        orders, rule_orders, _ = lookahead_week1(model, outcome.schedule, VARIANT_C, search, settings,
+        outcome = Searcher(model, settings, search, holdout, start_schedule=warm_start).run()
+        orders, rule_orders, _ = lookahead_week1(model, outcome.schedule, search, settings,
                                                  outcome.margins, outcome.unfixable)
 
         # the "real" week: one independent seed, detailed trace for the state update
         reality_seed = build_scenarios(model, 1, 777_000 + review, "reality")
-        reality = simulate(model, outcome.schedule, reality_seed, trace_seeds=[0], variant=VARIANT_C,
-                           week1_orders=orders)
+        reality = simulate(model, outcome.schedule, reality_seed, trace_seeds=[0], week1_orders=orders)
 
         for row in committed_decisions(model, outcome.schedule, reality, rule_orders):
             decision_rows.append({"review_week": review, **row})

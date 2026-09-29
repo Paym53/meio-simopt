@@ -1,7 +1,7 @@
 """
-Week-1 lookahead (policy variant C).
+Week-1 lookahead (last part of the ordering policy).
 
-The (s,S) rule is tuned first (variant B). Then the decisions that are committed
+The age-aware capped (s,S) rule is tuned first (meio/search.py). Then the decisions that are committed
 now - the DC order of each product and the supplier order of each raw material
 in week 1 - are chosen directly by simulation:
 
@@ -26,22 +26,22 @@ import numpy as np
 import pandas as pd
 
 from . import service
-from .config import ModelInput, PolicyVariant, SearchSettings
+from .config import ModelInput, SearchSettings
 from .policy import PolicySchedule
 from .scenarios import ScenarioSet
 from .simulation import simulate
 
 
-def _score(model, schedule, variant, seeds, orders, settings, margins, unfixable):
+def _score(model, schedule, seeds, orders, settings, margins, unfixable):
     """Mean cost and the set of cells failing the search rule for one candidate."""
-    result = simulate(model, schedule, seeds, variant=variant, week1_orders=orders)
+    result = simulate(model, schedule, seeds, week1_orders=orders)
     cells = service.apply_search_rule(service.cell_table(model, result), settings.z, margins)
     failing = {(p, c, int(w)) for p, c, w, ok in zip(cells["product"], cells["channel"], cells["week"],
                                                      cells["search_feasible"]) if not ok}
     return result.mean_total_cost(), failing - set(unfixable), result
 
 
-def _choose(step, item, candidates, rule_quantity, orders, key, model, schedule, variant,
+def _choose(step, item, candidates, rule_quantity, orders, key, model, schedule,
             seeds, settings, margins, unfixable, log):
     """Evaluate all candidates for one decision and return the best quantity.
     The rule's own quantity is the incumbent; another candidate must be strictly better."""
@@ -49,7 +49,7 @@ def _choose(step, item, candidates, rule_quantity, orders, key, model, schedule,
     for q in candidates:
         trial = {"dc": dict(orders["dc"]), "rm": dict(orders["rm"])}
         trial[key][item] = int(q)
-        cost, failing, _ = _score(model, schedule, variant, seeds, trial, settings, margins, unfixable)
+        cost, failing, _ = _score(model, schedule, seeds, trial, settings, margins, unfixable)
         rows.append({"step": step, "item": item, "candidate": int(q), "is_rule_quantity": int(q) == rule_quantity,
                      "mean_cost": round(cost, 2), "failing_cells": len(failing)})
         failing_sets.append(failing)
@@ -66,12 +66,12 @@ def _choose(step, item, candidates, rule_quantity, orders, key, model, schedule,
     return rows[best]["candidate"]
 
 
-def lookahead_week1(model: ModelInput, schedule: PolicySchedule, variant: PolicyVariant,
+def lookahead_week1(model: ModelInput, schedule: PolicySchedule,
                     seeds: ScenarioSet, settings: SearchSettings, margins: dict, unfixable: set):
     """Return (orders, rule_orders, log): the chosen week-1 orders
     {"dc": {product: Q}, "rm": {material: O}}, the rule's own week-1 orders, and a
     table of every evaluated candidate."""
-    base = simulate(model, schedule, seeds, variant=variant)
+    base = simulate(model, schedule, seeds)
     rule_orders = {"dc": {p.name: int(base.dc[p.name]["ordered_Q"][0, 1]) for p in model.products},
                    "rm": {m.name: int(base.rm[m.name]["ordered_O"][0, 1]) for m in model.materials}}
     orders = {"dc": dict(rule_orders["dc"]), "rm": dict(rule_orders["rm"])}
@@ -86,7 +86,7 @@ def lookahead_week1(model: ModelInput, schedule: PolicySchedule, variant: Policy
         if feasible >= p.moq and 1 not in p.closed_production_weeks:
             candidates.update(range(p.moq, feasible + 1, p.batch_size))
         orders["dc"][p.name] = _choose("1 DC order", p.name, sorted(candidates), rule_orders["dc"][p.name],
-                                       orders, "dc", model, schedule, variant, seeds, settings, margins,
+                                       orders, "dc", model, schedule, seeds, settings, margins,
                                        unfixable, log)
 
     # --- RM orders: 0, MOQ and a grid around the rule's quantity, one material at a time
@@ -103,6 +103,6 @@ def lookahead_week1(model: ModelInput, schedule: PolicySchedule, variant: Policy
         if m.supplier_capacity is not None:
             candidates = {min(q, m.supplier_capacity) for q in candidates}
         orders["rm"][m.name] = _choose("2 RM order", m.name, sorted(candidates), rule_q, orders, "rm",
-                                       model, schedule, variant, seeds, settings, margins, unfixable, log)
+                                       model, schedule, seeds, settings, margins, unfixable, log)
 
     return orders, rule_orders, pd.DataFrame(log)

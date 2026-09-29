@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from . import service
-from .config import VARIANT_A, ModelInput, PolicyVariant, SearchSettings
+from .config import ModelInput, SearchSettings
 from .policy import PolicySchedule, dc_order_weeks, initial_schedule, rm_order_weeks
 from .scenarios import ScenarioSet
 from .simulation import SimResult, simulate
@@ -58,9 +58,8 @@ class OptimisationOutcome:
 class Searcher:
     def __init__(self, model: ModelInput, settings: SearchSettings,
                  search_seeds: ScenarioSet, holdout_seeds: ScenarioSet, verbose: bool = True,
-                 start_schedule: PolicySchedule | None = None, variant: PolicyVariant = VARIANT_A):
+                 start_schedule: PolicySchedule | None = None):
         self.model = model
-        self.variant = variant
         self.settings = settings
         self.search_seeds = search_seeds
         self.holdout_seeds = holdout_seeds
@@ -85,7 +84,7 @@ class Searcher:
     def evaluate(self, schedule: PolicySchedule) -> Evaluation:
         """Simulate the search seeds and apply the search rule (unfixable cells excluded)."""
         self.n_evaluations += 1
-        result = simulate(self.model, schedule, self.search_seeds, variant=self.variant)
+        result = simulate(self.model, schedule, self.search_seeds)
         cells = service.apply_search_rule(service.cell_table(self.model, result),
                                           self.settings.z, self.margins)
         keys = list(zip(cells["product"], cells["channel"], cells["week"]))
@@ -113,12 +112,12 @@ class Searcher:
               move: str, fraction: float) -> PolicySchedule | None:
         """Copy of the schedule with one move applied, or None if the move is not allowed."""
         new = schedule.copy()
-        if kind == "DC cap":                             # variant B/C: order cap of a product
+        if kind == "DC cap":                             # order cap of a product
             p = next(x for x in self.model.products if x.name == name)
             step = self.step_size(new.dc_cap[name], p.batch_size, fraction)
             new.dc_cap[name] += step if move == "raise" else -step
             return new if new.dc_cap[name] >= p.moq else None
-        if kind == "RM floor":                           # variant B/C: minimum physical RM stock
+        if kind == "RM floor":                           # minimum physical RM stock
             m = self.model.material(name)
             step = self.step_size(max(new.rm_floor[name], m.batch_size), m.batch_size, fraction)
             new.rm_floor[name] += step if move == "raise" else -step
@@ -186,21 +185,19 @@ class Searcher:
                 if weeks:
                     changed_weeks[mat_name] = weeks
             if changed_weeks:
-                if self.variant.cap_and_floor:           # also raise the physical minimum
-                    for mat_name in changed_weeks:
-                        m = model.material(mat_name)
-                        schedule.rm_floor[mat_name] += self.step_size(max(schedule.rm_floor[mat_name], m.batch_size),
-                                                                      m.batch_size, st.step_fraction)
+                for mat_name in changed_weeks:           # also raise the physical minimum
+                    m = model.material(mat_name)
+                    schedule.rm_floor[mat_name] += self.step_size(max(schedule.rm_floor[mat_name], m.batch_size),
+                                                                  m.batch_size, st.step_fraction)
                 text = "; ".join(f"{k} weeks {v[0]}-{v[-1]}" for k, v in changed_weeks.items())
                 return True, f"RM was binding -> raised RMW (s,S) and minimum: {text}"
             return False, f"releases cut by {short_materials}, but no RM order can arrive in time"
 
-        # 1b. (variant B/C) orders limited by the policy's own cap? -> raise the cap
-        if self.variant.cap_and_floor:
-            cap_share = result.dc[p.name]["cut_by_policy_cap"][:, release_weeks].mean(axis=0).max()
-            if cap_share > st.cut_share_threshold:
-                schedule.dc_cap[p.name] += self.step_size(schedule.dc_cap[p.name], p.batch_size, st.step_fraction)
-                return True, f"order cap was binding -> raised DC cap of {p.name} to {schedule.dc_cap[p.name]}"
+        # 1b. orders limited by the policy's own cap? -> raise the cap
+        cap_share = result.dc[p.name]["cut_by_policy_cap"][:, release_weeks].mean(axis=0).max()
+        if cap_share > st.cut_share_threshold:
+            schedule.dc_cap[p.name] += self.step_size(schedule.dc_cap[p.name], p.batch_size, st.step_fraction)
+            return True, f"order cap was binding -> raised DC cap of {p.name} to {schedule.dc_cap[p.name]}"
 
         # 2. capacity binding? -> produce earlier
         capacity_share = result.dc[p.name]["cut_by_capacity"][:, release_weeks].mean(axis=0).max()
@@ -274,9 +271,8 @@ class Searcher:
             return current
         blocks = [("DC", p.name, t) for p in model.products for t in dc_order_weeks(model, p)]
         blocks += [("RM", m.name, t) for m in model.materials for t in rm_order_weeks(model, m)]
-        if self.variant.cap_and_floor:
-            blocks += [("DC cap", p.name, 0) for p in model.products]
-            blocks += [("RM floor", m.name, 0) for m in model.materials]
+        blocks += [("DC cap", p.name, 0) for p in model.products]
+        blocks += [("RM floor", m.name, 0) for m in model.materials]
         level_moves = ["lower s and S", "lower S (smaller orders)", "raise S (larger orders)"]
         fraction = st.step_fraction
 
@@ -330,7 +326,7 @@ class Searcher:
             ev = self.improve(ev, round_no)
             schedule = ev.schedule
 
-            hold_result = simulate(self.model, schedule, self.holdout_seeds, variant=self.variant)
+            hold_result = simulate(self.model, schedule, self.holdout_seeds)
             hold_cells = service.cell_table(self.model, hold_result)
             weak = service.holdout_check(hold_cells, self.margins, st.min_margin_bump)
             weak.insert(0, "round", round_no)
