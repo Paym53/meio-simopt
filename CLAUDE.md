@@ -1,5 +1,11 @@
 # CLAUDE.md - instructions for Claude Code in this repository
 
+## Engineering protocol (binding for every coding task)
+Follow @docs/engineering_protocol.md: formulate first (objective, hard/soft constraints,
+Gherkin acceptance criteria, verification tier), enforce quality through deterministic
+gates, run the role pipeline, and report a verification report. The conventions below win
+on any conflict.
+
 ## What this is
 Simulation-optimisation model for a perishable two-echelon supply chain: suppliers → raw-material warehouse (RMW) → production (PF, no stock) → DC → sales channels.
 - **Main policy (variant C):** an age-aware (s,S) rule with a DC order cap and RMW minimums, tuned by simulation, plus a week-1 lookahead.
