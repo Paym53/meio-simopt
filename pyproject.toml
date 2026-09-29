@@ -1,0 +1,16 @@
+[project]
+name = "meio-simopt"
+version = "0.1.0"
+description = "Simulation-optimisation of a perishable two-echelon supply chain with production (age-aware (s,S) + lookahead)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.0", "openpyxl>=3.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["meio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
