@@ -337,7 +337,7 @@ def test_only_one_policy_exists_in_the_code():
     import re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     forbidden = re.compile(r"PolicyVariant|VARIANT_?[ABCS]?\b|--variant|\bvariant\b", re.IGNORECASE)
-    sources = [os.path.join(root, "main.py"), os.path.join(root, "rolling_demo.py")]
+    sources = [os.path.join(root, f) for f in ("main.py", "rolling_demo.py", "api.py")]
     sources += [os.path.join(root, "meio", f) for f in os.listdir(os.path.join(root, "meio")) if f.endswith(".py")]
     for path in sources:
         with open(path, encoding="utf-8") as fh:

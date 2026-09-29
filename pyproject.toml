@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Simulation-optimisation of a perishable two-echelon supply chain with production (age-aware (s,S) + lookahead)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pandas>=2.0", "openpyxl>=3.1"]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "openpyxl>=3.1", "fastapi>=0.110.0", "uvicorn>=0.28.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "httpx>=0.27"]
 
 [tool.setuptools]
 packages = ["meio"]

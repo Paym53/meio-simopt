@@ -14,9 +14,10 @@ Simulation-optimisation model for a perishable two-echelon supply chain: supplie
 ## Commands
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                         # must pass before every commit (27+ tests)
+python -m pytest -q                         # must pass before every commit (43+ tests)
 python main.py --preset quick               # end-to-end check, ~1-2 min, writes output/run_*/
 python main.py --input examples/example_input.json --preset quick
+python api.py                               # web API on http://localhost:8000/docs (tests: tests/test_api.py)
 ```
 
 ## Conventions (do not break)
@@ -49,4 +50,4 @@ python main.py --input examples/example_input.json --preset quick
 ## Planned next work
 1. Search algorithm: multi-start (quantile start + further start schedules), fewer parameters, a better optimiser.
 2. Several finished goods sharing raw materials; realistic holding costs (unit value × rate + storage).
-3. Web API (FastAPI, asynchronous runs) for a Lovable frontend (see `docs/app_integration.md`).
+3. Lovable frontend on top of the web API (`api.py`, deployed on Render; see `docs/app_integration.md`).
