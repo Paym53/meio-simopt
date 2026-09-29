@@ -18,6 +18,8 @@ small hosting instance has little memory); later requests wait with status "queu
 Environment variables (all optional)
     MEIO_API_KEY       if set, every endpoint except /health needs the header  X-API-Key: <key>
     MEIO_CORS_ORIGINS  comma-separated origins allowed to call the API from a browser (default *)
+    MEIO_ALLOWED_PRESETS  comma-separated presets the API accepts (default: all). On a 512 MB
+                       instance use "quick,standard": a "full" run peaks at about 450 MB.
     MEIO_OUTPUT_DIR    folder for the run folders (default: output)
 
 The policy is always the model's only policy (age-aware capped (s,S) + week-1 lookahead).
@@ -75,6 +77,12 @@ def set_job(run_id: str, **fields) -> None:
         RUN_JOBS.setdefault(run_id, {}).update(fields)
 
 
+def allowed_presets() -> list[str]:
+    """Presets this deployment accepts (MEIO_ALLOWED_PRESETS, default: all presets)."""
+    configured = [p.strip() for p in os.environ.get("MEIO_ALLOWED_PRESETS", "").split(",") if p.strip()]
+    return [p for p in PRESETS if not configured or p in configured]
+
+
 def parse_input(payload: dict) -> ModelInput:
     """Build and check the model from the request body. Raises HTTP 422 with a clear message."""
     try:
@@ -105,10 +113,11 @@ def health() -> dict:
 
 @app.post("/runs", dependencies=[Depends(require_api_key)])
 def create_run(payload: dict[str, Any], background_tasks: BackgroundTasks,
-               preset: str = Query("quick", description=f"one of {list(PRESETS)}")) -> dict:
+               preset: str = Query("quick", description=f"one of {list(PRESETS)} (if allowed)")) -> dict:
     """Check the input, queue the run and return at once with its run_id."""
-    if preset not in PRESETS:
-        raise HTTPException(status_code=422, detail=f"unknown preset '{preset}', choose from {list(PRESETS)}")
+    if preset not in allowed_presets():
+        raise HTTPException(status_code=422, detail=f"unknown or disabled preset '{preset}', "
+                                                    f"choose from {allowed_presets()}")
     model = parse_input(payload)
     run_id = uuid.uuid4().hex[:12]
     set_job(run_id, status="queued", preset=preset, summary=None, error=None)

@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 python main.py --preset quick      # ~1-2 min, example input
 python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 43 tests
+python -m pytest -q                # 49 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:
@@ -62,9 +62,9 @@ python api.py                      # http://localhost:8000/docs (interactive)
 | `GET /runs/{run_id}` | `status`: queued, running, completed or failed; when completed also `summary` (= `summary.json`) |
 | `GET /runs/{run_id}/results.xlsx` | The Excel workbook of a completed run |
 
-Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` (then every endpoint except `/health` needs the header `X-API-Key`), `MEIO_CORS_ORIGINS` (comma-separated, default `*`), `MEIO_OUTPUT_DIR` (default `output`).
+Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` (then every endpoint except `/health` needs the header `X-API-Key`), `MEIO_ALLOWED_PRESETS` (comma-separated, default all), `MEIO_CORS_ORIGINS` (comma-separated, default `*`), `MEIO_OUTPUT_DIR` (default `output`).
 
-**Hosting on Render.** New → Web Service → this repository. Runtime Python 3, build command `pip install -r requirements.txt`, start command `uvicorn api:app --host 0.0.0.0 --port $PORT`. Run folders live on the instance's disk, so they are lost when a free instance restarts or sleeps.
+**Hosting on Render.** Defined as code in [`render.yaml`](render.yaml); step-by-step runbook in [`docs/deployment_render.md`](docs/deployment_render.md). After deploying, check it with `python scripts/smoke_test.py https://<service>.onrender.com --key <key>`.
 
 ## How a run works
 
@@ -103,6 +103,8 @@ The full specification is in [`docs/model_specification_v5.md`](docs/model_speci
 CLAUDE.md                  instructions for Claude Code (commands, conventions, workflow)
 main.py                    one review (default: preset standard)
 api.py                     web API (FastAPI) around main.run
+render.yaml                Render deployment (Blueprint)
+scripts/smoke_test.py      checks a deployed API end to end
 rolling_demo.py            consecutive weekly reviews
 meio/
   config.py                input dataclasses, policy name, presets, example instance
@@ -117,6 +119,7 @@ meio/
   tables.py, report.py, excel_export.py   output
 tests/test_mechanics.py    unit tests (conservation, FIFO, arrivals, rules, JSON)
 tests/test_api.py          web API tests (input checks, run lifecycle, API key)
+tests/test_deployment.py   render.yaml consistent with api.py and CI
 examples/                  example_input.json (input format) and example_summary.json (output of a quick run)
 docs/                      specification, policy choice, app integration plan
 ```
@@ -126,7 +129,7 @@ docs/                      specification, policy choice, app integration plan
 - ✅ Running model with the age-aware capped (s,S) + lookahead policy, Excel and JSON output, tests and CI.
 - ⏭ Search algorithm: multi-start, parameter reduction, better optimiser. Currently the start point changes results by up to 18 %.
 - ⏭ Several finished goods sharing raw materials; realistic holding costs (value × rate + storage).
-- ✅ Web API (`api.py`), ready for hosting on Render.
+- ✅ Web API (`api.py`) with Render Blueprint (`render.yaml`).
 - ⏭ Lovable frontend: see [`docs/app_integration.md`](docs/app_integration.md).
 
 ## Main limitations

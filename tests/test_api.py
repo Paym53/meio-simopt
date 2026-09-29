@@ -91,7 +91,7 @@ def test_input_failing_the_model_checks_is_rejected(client):
 def test_non_object_body_and_unknown_preset_are_rejected(client):
     assert client.post("/runs", json=[1, 2]).status_code == 422
     r = client.post("/runs?preset=huge", json=EXAMPLE)
-    assert r.status_code == 422 and "unknown preset" in r.json()["detail"] and client.calls == []
+    assert r.status_code == 422 and "unknown or disabled preset" in r.json()["detail"] and client.calls == []
 
 
 def test_failing_run_reports_the_error(client, monkeypatch):
@@ -149,3 +149,12 @@ def test_run_folders_not_created_by_the_api_are_not_exposed(client):
             fh.write(content)
     assert client.get("/runs/manual").status_code == 404
     assert client.get("/runs/manual/results.xlsx").status_code == 404
+
+
+def test_presets_can_be_limited_per_deployment(client, monkeypatch):
+    monkeypatch.setenv("MEIO_ALLOWED_PRESETS", "quick, standard")
+    r = client.post("/runs?preset=full", json=EXAMPLE)
+    assert r.status_code == 422 and "['quick', 'standard']" in r.json()["detail"] and client.calls == []
+    assert client.post("/runs?preset=standard", json=EXAMPLE).status_code == 200
+    monkeypatch.delenv("MEIO_ALLOWED_PRESETS")
+    assert client.post("/runs?preset=full", json=EXAMPLE).status_code == 200

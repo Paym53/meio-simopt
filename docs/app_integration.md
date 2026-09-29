@@ -50,7 +50,7 @@ The detailed `results.xlsx` stays available as a download.
    - `GET /health`: liveness probe.
    - Key: set `MEIO_API_KEY` on the host; every endpoint except `/health` then needs the header `X-API-Key`. `MEIO_CORS_ORIGINS` limits browser origins (default `*`).
    - The job registry is in memory and run folders are on the instance disk: after a restart, finished runs are still found if their folder survived; on a free Render instance it does not.
-2. **Hosting.** Render web service: build `pip install -r requirements.txt`, start `uvicorn api:app --host 0.0.0.0 --port $PORT`. Set `MEIO_API_KEY` as an environment variable and store the same key as a Supabase secret, so only the edge function (not the browser) sends it.
+2. **Hosting.** Render web service defined in `render.yaml`; runbook: [`deployment_render.md`](deployment_render.md). Set `MEIO_API_KEY` as an environment variable and store the same key as a Supabase secret, so only the edge function (not the browser) sends it.
 3. **Lovable project.**
    - Create it with Lovable Cloud or your own Supabase.
    - Store the API URL and key as Supabase secrets.
