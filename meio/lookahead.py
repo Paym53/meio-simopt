@@ -34,7 +34,7 @@ from .simulation import simulate
 
 def _score(model, schedule, seeds, orders, settings, margins, unfixable):
     """Mean cost and the set of cells failing the search rule for one candidate."""
-    result = simulate(model, schedule, seeds, week1_orders=orders)
+    result = simulate(model, schedule, seeds, week1_orders=orders, report_details=False)
     cells = service.apply_search_rule(service.cell_table(model, result), settings.z, margins)
     failing = {(p, c, int(w)) for p, c, w, ok in zip(cells["product"], cells["channel"], cells["week"],
                                                      cells["search_feasible"]) if not ok}
@@ -71,7 +71,7 @@ def lookahead_week1(model: ModelInput, schedule: PolicySchedule,
     """Return (orders, rule_orders, log): the chosen week-1 orders
     {"dc": {product: Q}, "rm": {material: O}}, the rule's own week-1 orders, and a
     table of every evaluated candidate."""
-    base = simulate(model, schedule, seeds)
+    base = simulate(model, schedule, seeds, report_details=False)
     rule_orders = {"dc": {p.name: int(base.dc[p.name]["ordered_Q"][0, 1]) for p in model.products},
                    "rm": {m.name: int(base.rm[m.name]["ordered_O"][0, 1]) for m in model.materials}}
     orders = {"dc": dict(rule_orders["dc"]), "rm": dict(rule_orders["rm"])}

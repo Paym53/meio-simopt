@@ -607,3 +607,113 @@ def test_products_with_different_tau_share_the_capacity_of_their_production_week
     assert shared.dc["F2"]["cut_by_capacity"][0, 2] == 1
     alone = simulate(model, schedule(0), seeds)
     assert alone.dc["F2"]["released_P"][0, 2] == 100
+
+
+# ---------------------------------------------------------------------------
+# Speed-ups must not change results: fast paths against the step-by-step reference
+# ---------------------------------------------------------------------------
+def _withdraw_fifo_reference(stock, quantity, max_age):
+    taken = np.zeros_like(stock)
+    remaining = quantity.astype(np.int64).copy()
+    for age in range(max_age, 0, -1):
+        take = np.minimum(stock[:, age], remaining)
+        stock[:, age] -= take
+        taken[:, age] = take
+        remaining -= take
+    assert not (remaining > 0).any()
+    return taken
+
+
+def test_vectorised_withdraw_fifo_equals_the_age_by_age_reference():
+    from meio.simulation import withdraw_fifo
+    rng = np.random.default_rng(11)
+    for _ in range(2000):
+        n, ages = int(rng.integers(1, 6)), int(rng.integers(2, 14))
+        stock = rng.integers(0, 60, size=(n, ages + 1))
+        stock[:, 0] = 0
+        max_age = int(rng.integers(1, ages + 1))
+        quantity = (rng.random(n) * (stock[:, 1:max_age + 1].sum(axis=1) + 1)).astype(np.int64)
+        quantity = np.minimum(quantity, stock[:, 1:max_age + 1].sum(axis=1))
+        fast, reference = stock.copy(), stock.copy()
+        assert np.array_equal(withdraw_fifo(fast, quantity, max_age),
+                              _withdraw_fifo_reference(reference, quantity, max_age))
+        assert np.array_equal(fast, reference)
+
+
+def test_withdraw_fifo_still_refuses_more_than_the_stock():
+    from meio.simulation import withdraw_fifo
+    stock = np.array([[0, 5, 5, 5]])
+    try:
+        withdraw_fifo(stock, np.array([11]), 2)             # only ages 1-2 usable: 10 units
+    except RuntimeError:
+        return
+    raise AssertionError("withdrawing more than the usable stock was accepted")
+
+
+def test_vectorised_allocation_equals_the_age_by_age_reference():
+    """Random stock, demand, shelf-life gates and ties; mostly the model's priority
+    (strictest first), every fifth case an arbitrary priority order."""
+    from meio.simulation import _allocate_demand_loop, allocate_demand
+    rng = np.random.default_rng(12)
+    for trial in range(3000):
+        n, ages, k = int(rng.integers(1, 6)), int(rng.integers(2, 14)), int(rng.integers(1, 5))
+        stock = rng.integers(0, 50, size=(n, ages + 1))
+        stock[:, 0] = 0
+        max_age = [int(a) for a in rng.integers(0, ages + 3, size=k)]
+        priority = sorted(range(k), key=lambda c: (max_age[c], c))
+        if trial % 5 == 0:
+            priority = [int(c) for c in rng.permutation(k)]     # any order gives the same result
+        demand = [rng.integers(0, 120, size=n) for _ in range(k)]
+        fast, reference = stock.copy(), stock.copy()
+        sales_f, lost_f = allocate_demand(fast, demand, max_age, priority)
+        sales_r, lost_r = _allocate_demand_loop(reference, demand, max_age, priority)
+        assert np.array_equal(fast, reference)
+        for c in range(k):
+            assert np.array_equal(sales_f[c], sales_r[c]) and np.array_equal(lost_f[c], lost_r[c])
+
+
+def test_search_simulation_without_report_details_makes_the_same_decisions():
+    model = build_example_input()
+    schedule = initial_schedule(model, SearchSettings(n_quantile_samples=1000))
+    seeds = build_scenarios(model, 50, 4, "d")
+    full = simulate(model, schedule, seeds)
+    lean = simulate(model, schedule, seeds, report_details=False)
+    for p in model.products:
+        for key in full.dc[p.name]:
+            assert np.array_equal(full.dc[p.name][key], lean.dc[p.name][key])
+    for m in model.materials:
+        for key in full.rm[m.name]:
+            assert np.array_equal(full.rm[m.name][key], lean.rm[m.name][key])
+    assert np.array_equal(full.total_cost_per_seed(), lean.total_cost_per_seed())
+    assert lean.dc_remaining_life_end == {} and len(full.dc_remaining_life_end) == len(model.products)
+
+
+def test_projected_fg_waste_equals_the_projection_through_allocate_demand():
+    """The projection runs its own allocation loop (no sales bookkeeping); it must give
+    bit-identical floats to projecting with the reference allocation."""
+    from meio.simulation import _allocate_demand_loop, projected_fg_waste
+
+    def reference(stock, weekly, max_age, priority):
+        proj = stock.astype(float)
+        n, oldest = proj.shape[0], proj.shape[1] - 1
+        waste = np.zeros(n)
+        for w, means in enumerate(weekly):
+            if w > 0:
+                proj[:, 2:] = proj[:, 1:-1].copy()
+                proj[:, 1] = 0.0
+            _allocate_demand_loop(proj, [np.full(n, d) for d in means], max_age, priority)
+            waste += proj[:, oldest]
+            proj[:, oldest] = 0.0
+        return waste
+
+    rng = np.random.default_rng(13)
+    for _ in range(1000):
+        n, ages, k = int(rng.integers(1, 5)), int(rng.integers(2, 13)), int(rng.integers(1, 4))
+        stock = rng.integers(0, 80, size=(n, ages + 1))
+        stock[:, 0] = 0
+        max_age = [int(a) for a in rng.integers(1, ages + 2, size=k)]
+        priority = sorted(range(k), key=lambda c: (max_age[c], c))
+        weekly = [[float(x) if rng.random() > 0.2 else 0.0 for x in rng.uniform(0, 40, size=k)]
+                  for _ in range(int(rng.integers(1, 9)))]
+        assert np.array_equal(projected_fg_waste(stock, weekly, max_age, priority),
+                              reference(stock, weekly, max_age, priority))

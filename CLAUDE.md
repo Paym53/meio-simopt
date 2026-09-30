@@ -14,7 +14,7 @@ Simulation-optimisation model for a perishable two-echelon supply chain: supplie
 ## Commands
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                         # must pass before every commit (80+ tests)
+python -m pytest -q                         # must pass before every commit (85+ tests)
 python main.py --preset quick               # end-to-end check, ~1-2 min, writes output/run_*/
 python main.py --input examples/example_input.json --preset quick
 python api.py                               # web API on http://localhost:8000/docs (tests: tests/test_api.py)
@@ -34,6 +34,7 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
   - hold-out: weak if `mean < F`, then `margin += max(bump, F - mean)`;
   - final verdict: `mean >= F`, with no Z and no margin.
   - Seeds with zero demand in a cell are excluded. The evaluation window starts after the global L_max.
+- **Speed-ups never change results.** Fast paths (vectorised FIFO withdrawal/allocation over ages, running pipeline totals, constants precomputed per `simulate` call, `report_details=False` in the search and lookahead) must stay bit-identical to the step-by-step versions; `tests/test_mechanics.py` compares them against reference loops. The float expected-waste projection keeps its sequential arithmetic (order of float operations matters).
 - **Cut releases** still respect batch size and MOQ (round down; below the MOQ nothing is released).
 - **Lookahead.** A candidate may not fail any cell the rule's own quantity passes; among those, the cheapest wins.
 - **JSON contract.** `examples/example_input.json` (input) and `summary.json` (output, snake_case keys) are used by a future app. Change them only on purpose, and update `meio/io_json.py`, the examples and `docs/app_integration.md` together.

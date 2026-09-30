@@ -22,13 +22,13 @@ repository stays the single source of truth.
 
 ## Choosing the plan
 
-A `quick` run needs about 100 CPU-seconds (single-threaded; measured on a development machine,
+A `quick` run needs about 70 CPU-seconds (single-threaded; measured on a development machine,
 Render's CPUs may be slower).
 
 | Plan | CPU / RAM | Expected `quick` run | Behaviour |
 |---|---|---|---|
-| Free | 0.1 CPU / 512 MB | ~15-20 min | Sleeps after 15 min without requests (first request then waits ~1 min); monthly free hours are limited |
-| Starter (paid) | 0.5 CPU / 512 MB | ~3-4 min | Always on |
+| Free | 0.1 CPU / 512 MB | ~7-8 min (estimate: >10 min observed before the speed-ups, which cut CPU time by ~35 %) | Sleeps after 15 min without requests (first request then waits ~1 min); monthly free hours are limited |
+| Starter (paid) | 0.5 CPU / 512 MB | ~2-3 min | Always on |
 
 Use Free to try the integration; use Starter (or larger) once people rely on it.
 Plan details change: check render.com/pricing before deciding.

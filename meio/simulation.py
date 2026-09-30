@@ -110,28 +110,41 @@ def tier_unit_cost(qty: np.ndarray, tiers: list[Tier]) -> np.ndarray:
     return rate
 
 
+def _differences(cumulative: np.ndarray) -> np.ndarray:
+    """Per-column amounts from a running total along axis 1 (first column stays as is)."""
+    out = cumulative.copy()
+    out[:, 1:] -= cumulative[:, :-1]
+    return out
+
+
 def withdraw_fifo(stock: np.ndarray, quantity: np.ndarray, max_age: int) -> np.ndarray:
     """Take `quantity` units per seed out of `stock` (n_seeds, ages + 1), oldest
     first, using only ages <= max_age. Changes stock in place and returns the
-    taken units per age. Raises an error if there is not enough stock."""
+    taken units per age. Raises an error if there is not enough stock.
+
+    Vectorised over ages (integer stock, so exact): going from the oldest usable age
+    down, the cumulative stock C_k is taken up to the quantity: taken so far =
+    min(C_k, quantity); the take of each age is the difference of that series."""
     taken = np.zeros_like(stock)
-    remaining = quantity.astype(np.int64).copy()
-    for age in range(max_age, 0, -1):
-        take = np.minimum(stock[:, age], remaining)
-        stock[:, age] -= take
-        taken[:, age] = take
-        remaining -= take
-    if (remaining > 0).any():
+    top = min(max_age, stock.shape[1] - 1)
+    quantity = quantity.astype(np.int64)
+    if top < 1:
+        if (quantity > 0).any():
+            raise RuntimeError("withdraw_fifo: not enough stock (release was not capped correctly)")
+        return taken
+    usable = stock[:, top:0:-1]                       # ages top, top-1, ..., 1 (oldest first)
+    cumulative = np.cumsum(usable, axis=1)
+    if (cumulative[:, -1] < quantity).any():
         raise RuntimeError("withdraw_fifo: not enough stock (release was not capped correctly)")
+    take = _differences(np.minimum(cumulative, quantity[:, None]))
+    taken[:, top:0:-1] = take
+    stock[:, top:0:-1] -= take
     return taken
 
 
-def allocate_demand(stock: np.ndarray, demand: list[np.ndarray], max_age: list[int],
-                    priority: list[int]) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Serve demand from stock (changed in place).
-    Age buckets are used from oldest to youngest (FIFO). Within a bucket the channels
-    that accept this age are served in priority order. Unmet demand is lost.
-    Returns sales per channel by age (n_seeds, ages + 1) and lost sales per channel."""
+def _allocate_demand_loop(stock, demand, max_age, priority):
+    """Reference allocation, age by age (oldest first), channels in priority order within
+    an age. Used for float stock (the expected-waste projection) and as a fallback."""
     open_demand = [np.asarray(d).astype(stock.dtype) for d in demand]   # a copy, same type as the stock
     sales = [np.zeros_like(stock) for _ in demand]
     for age in range(stock.shape[1] - 1, 0, -1):
@@ -142,6 +155,38 @@ def allocate_demand(stock: np.ndarray, demand: list[np.ndarray], max_age: list[i
             stock[:, age] -= take
             open_demand[c] -= take
             sales[c][:, age] += take
+    return sales, open_demand
+
+
+def allocate_demand(stock: np.ndarray, demand: list[np.ndarray], max_age: list[int],
+                    priority: list[int]) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Serve demand from stock (changed in place).
+    Age buckets are used from oldest to youngest (FIFO). Within a bucket the channels
+    that accept this age are served in priority order. Unmet demand is lost.
+    Returns sales per channel by age (n_seeds, ages + 1) and lost sales per channel.
+
+    Fast path for integer stock: "age by age, channels in priority order within an age"
+    gives the same result as "channel by channel in priority order, each FIFO over its
+    accepted ages". At an age, a channel's take is min(stock left there after the
+    higher-priority channels, its own demand left after the older ages); neither depends
+    on what lower-priority channels took at other ages, so the order of the two loops
+    can be swapped. Each channel's FIFO take is then a cumulative sum over its ages
+    (exact for integers). Float stock (the expected-waste projection) keeps the loop."""
+    top = stock.shape[1] - 1
+    if not np.issubdtype(stock.dtype, np.integer):
+        return _allocate_demand_loop(stock, demand, max_age, priority)
+    limits = [min(max_age[c], top) for c in priority]
+    open_demand = [np.asarray(d).astype(stock.dtype) for d in demand]
+    sales = [np.zeros_like(stock) for _ in demand]
+    for c, limit in zip(priority, limits):
+        if limit < 1:
+            continue
+        usable = stock[:, limit:0:-1]                  # accepted ages, oldest first
+        served = np.minimum(np.cumsum(usable, axis=1), open_demand[c][:, None])
+        take = _differences(served)
+        sales[c][:, limit:0:-1] = take
+        stock[:, limit:0:-1] -= take
+        open_demand[c] -= served[:, -1]
     return sales, open_demand
 
 
@@ -177,7 +222,19 @@ def projected_fg_waste(stock: np.ndarray, weekly_channel_demand: list[list[float
         if w > 0:                                          # one week older
             proj[:, 2:] = proj[:, 1:-1].copy()
             proj[:, 1] = 0.0
-        allocate_demand(proj, [np.full(n, d) for d in channel_means], max_age, priority)
+        # the allocation of allocate_demand (same order, same float operations), without
+        # recording sales. Skipped because they would take exactly 0: channels without
+        # demand, and ages 1..w, which are empty in projection week w (no new stock enters
+        # the projection and everything ages one week per week).
+        open_demand = [np.full(n, float(d)) for d in channel_means]
+        for age in range(oldest, w, -1):
+            column = proj[:, age]
+            for c in priority:
+                if age > max_age[c] or channel_means[c] == 0:
+                    continue
+                take = np.minimum(column, open_demand[c])
+                column -= take
+                open_demand[c] -= take
         waste += proj[:, oldest]
         proj[:, oldest] = 0.0
     return waste
@@ -193,14 +250,15 @@ def projected_rm_waste(stock: np.ndarray, weekly_use: list[float], max_age: int)
         waste_j = max(0, stock of ages >= max_age - j  -  W_before  -  D_j)."""
     n = stock.shape[0]
     waste_before = np.zeros(n)
+    # stock of age >= a for every age a, from one cumulative sum (integers, so exact)
+    at_least = np.cumsum(stock[:, ::-1], axis=1)[:, ::-1]      # at_least[:, a] = stock[:, a:].sum()
     cumulative_use = 0.0
     for j, use in enumerate(weekly_use):
         cumulative_use += use
         age = max_age - j
         if age < 1:
             break
-        at_least_this_old = stock[:, age:].sum(axis=1)
-        waste_before += np.maximum(0.0, at_least_this_old - waste_before - cumulative_use)
+        waste_before += np.maximum(0.0, at_least[:, age] - waste_before - cumulative_use)
     return waste_before
 
 
@@ -232,16 +290,35 @@ def _age_row(prefix: dict, stock_row: np.ndarray) -> dict:
 # The simulation
 # ---------------------------------------------------------------------------
 def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
-             trace_seeds: list[int] | tuple = (), week1_orders: dict | None = None) -> SimResult:
+             trace_seeds: list[int] | tuple = (), week1_orders: dict | None = None,
+             report_details: bool = True) -> SimResult:
     """Simulate all seeds of `scen` under the age-aware capped (s,S) policy.
 
     week1_orders (optional): {"dc": {product: Q}, "rm": {material: O}} replaces the
-    rule's orders in week 1 only. Used by the lookahead to test candidate quantities."""
+    rule's orders in week 1 only. Used by the lookahead to test candidate quantities.
+    report_details=False skips values that only the reports use (average remaining shelf
+    life); the search and the lookahead simulate hundreds of candidates and never read them.
+    Everything the decisions and the search use is identical either way."""
     H, n = model.horizon, scen.n_seeds
     week1_orders = week1_orders or {"dc": {}, "rm": {}}
     products, materials = model.products, model.materials
     trace = Trace()
     trace_seeds = [k for k in trace_seeds if k < n]
+
+    # --- constants of this model, computed once instead of in every week ---
+    last_forecast_week = model.demand.last_week
+    mean_rows = {p.name: [[float(model.demand.mean[(p.name, c.name)][w]) for c in p.channels]
+                          for w in range(last_forecast_week + 1)] for p in products}
+
+    def mean_channel_demand(p, week):              # = _mean_channel_demand(model, p, week)
+        return mean_rows[p.name][min(week, last_forecast_week)]
+
+    tau = {p.name: model.rmw_to_pf_lead_time(p) for p in products}
+    release_to_dc_median = {p.name: tau[p.name] + p.lead_time_median for p in products}
+    channel_max_age = {p.name: [p.max_age_for_channel(c) for c in p.channels] for p in products}
+    channel_priority = {p.name: p.channel_priority() for p in products}
+    material_by_name = {m.name: m for m in materials}
+    users_of = {m.name: model.products_using(m.name) for m in materials}
 
     # --- which weeks may order (calendars and horizon rule C19) ---
     dc_can_order = {p.name: set(dc_order_weeks(model, p)) for p in products}
@@ -255,8 +332,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
     ch_rec = {(p.name, c.name): {s: zeros() for s in CHANNEL_SERIES} for p in products for c in p.channels}
     fill = {(p.name, c.name): np.full((n, H + 1), np.nan) for p in products for c in p.channels}
     cost = {name: np.zeros((n, H + 1)) for name in COST_COMPONENTS}
-    dc_life = {p.name: np.full((n, H + 1), np.nan) for p in products}
-    rm_life = {m.name: np.full((n, H + 1), np.nan) for m in materials}
+    dc_life = {p.name: np.full((n, H + 1), np.nan) for p in products} if report_details else {}
+    rm_life = {m.name: np.full((n, H + 1), np.nan) for m in materials} if report_details else {}
 
     # --- state: stock by age (column = age), future arrivals by week (column = week) ---
     dc_stock, dc_arrivals, dc_last_arrival = {}, {}, {}
@@ -283,7 +360,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
 
     # production capacity used per production week (a release of week t is produced in week
     # t + tau_p; products with different tau_p can share a production week)
-    capacity_used = np.zeros((n, H + max(model.rmw_to_pf_lead_time(p) for p in products) + 2), dtype=np.int64)
+    capacity_used = np.zeros((n, H + max(tau.values()) + 2), dtype=np.int64)
 
     rm_stock, rm_arrivals, rm_last_arrival = {}, {}, {}
     for m in materials:
@@ -306,6 +383,12 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                      "actual_arrival": int(arr[s]),
                                      "held_up_by_earlier_order": bool(arr[s] > raw_arrival[s])})
 
+    # Pipeline = everything scheduled to arrive after the current week. Kept as a running
+    # total (integers, so exactly the sum over arrivals[:, t + 1:]): minus the receipts of
+    # week t, plus new orders that arrive after week t.
+    dc_pipeline = {p.name: dc_arrivals[p.name][:, 1:].sum(axis=1) for p in products}
+    rm_pipeline = {m.name: rm_arrivals[m.name][:, 1:].sum(axis=1) for m in materials}
+
     def flow(seed, week, source, target, item, qty, note):
         if qty > 0:
             trace.flows.append({"seed": seed, "week": week, "from": source, "to": target,
@@ -323,11 +406,13 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
         # ---------------- Step 2: receipts ----------------
         for m in materials:
             receipt = rm_arrivals[m.name][:, t].copy()
+            rm_pipeline[m.name] -= receipt
             rm_stock[m.name][:, 1] += receipt
             rm_rec[m.name]["receipts"][:, t] = receipt
             rm_rec[m.name]["on_hand_start"][:, t] = rm_stock[m.name][:, 1:].sum(axis=1)
         for p in products:
             receipt = dc_arrivals[p.name][:, t].copy()
+            dc_pipeline[p.name] -= receipt
             dc_stock[p.name][:, 1] += receipt
             dc_rec[p.name]["receipts"][:, t] = receipt
             dc_rec[p.name]["on_hand_start"][:, t] = dc_stock[p.name][:, 1:].sum(axis=1)
@@ -350,14 +435,13 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
         ordered_Q, dc_expected_waste = {}, {}
         for p in products:
             on_hand = dc_stock[p.name][:, 1:].sum(axis=1)
-            pipeline = dc_arrivals[p.name][:, t + 1:].sum(axis=1)
+            pipeline = dc_pipeline[p.name].copy()
             position = on_hand + pipeline
 
             # subtract stock expected to expire before a new order arrives
-            window = [_mean_channel_demand(model, p, t + w) for w in range(model.release_to_dc_median(p))]
-            expected_waste = projected_fg_waste(dc_stock[p.name], window,
-                                                 [p.max_age_for_channel(c) for c in p.channels],
-                                                 p.channel_priority())
+            window = [mean_channel_demand(p, t + w) for w in range(release_to_dc_median[p.name])]
+            expected_waste = projected_fg_waste(dc_stock[p.name], window, channel_max_age[p.name],
+                                                 channel_priority[p.name])
             dc_expected_waste[p.name] = expected_waste
             effective = position - expected_waste
 
@@ -388,14 +472,14 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
         # ---------------- Step 3b + 3c: release, cancellation, RM transport ----------------
         usable_rm = {m.name: rm_stock[m.name][:, 1:].sum(axis=1) for m in materials}
         shipped_total = {m.name: np.zeros(n, dtype=np.int64) for m in materials}
-        shipped_by_age = {m.name: np.zeros_like(rm_stock[m.name]) for m in materials}
+        shipped_by_age = {m.name: np.zeros_like(rm_stock[m.name]) for m in materials} if trace_seeds else {}
 
         for p in products:                            # products share RM and capacity (list order)
             Q = ordered_Q[p.name]
             rm_limit = np.full(n, np.iinfo(np.int64).max)
             for mat_name, per_unit in p.bom.items():
                 rm_limit = np.minimum(rm_limit, usable_rm[mat_name] // per_unit)
-            production_week = model.production_week(p, t)   # all BOM materials at production: t + tau_p
+            production_week = t + tau[p.name]               # all BOM materials at production: t + tau_p
             capacity_before = model.capacity_in_week(production_week) - capacity_used[:, production_week]
             limit = np.minimum(np.minimum(Q, rm_limit), capacity_before)
             P = round_down_to_supply_rules(limit, p.batch_size, p.moq)
@@ -410,14 +494,16 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
 
             capacity_used[:, production_week] += P
             for mat_name, per_unit in p.bom.items():   # materials leave the RMW in the release week
-                m = model.material(mat_name)
+                m = material_by_name[mat_name]
                 taken = withdraw_fifo(rm_stock[mat_name], per_unit * P, m.max_shippable_age)
-                shipped_by_age[mat_name] += taken
+                if trace_seeds:
+                    shipped_by_age[mat_name] += taken
                 shipped_total[mat_name] += per_unit * P
                 usable_rm[mat_name] -= per_unit * P
 
             arrival = schedule_arrivals(dc_arrivals[p.name], dc_last_arrival[p.name], production_week, P,
                                         scen.dc_lead_time[p.name][:, t])
+            dc_pipeline[p.name] += np.where(arrival > t, P, 0)
 
             rec = dc_rec[p.name]
             rec["rm_limit"][:, t] = np.minimum(rm_limit, 10**9)
@@ -447,7 +533,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                 for mat_name, per_unit in p.bom.items():
                     flow(s, t, "RMW", "PF", mat_name, per_unit * P[s],
                          f"shipped for release of {p.name}; reaches production in week "
-                         f"{t + model.material(mat_name).rmw_to_pf_lead_time}, produced in week {production_week}")
+                         f"{t + material_by_name[mat_name].rmw_to_pf_lead_time}, produced in week {production_week}")
                     flow(s, t, "PF", "consumed", mat_name, per_unit * P[s],
                          f"transformed into {p.name} in week {production_week}")
                 flow(s, t, "PF", "In transit (PF -> DC)", p.name, P[s],
@@ -462,20 +548,21 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             cost["RMW->PF transport"][:, t] += m.transport_cost * shipped_total[m.name]
 
         # ---------------- Step 3d: RMW ordering on the echelon position ----------------
+        # FG position after this week's releases (on hand + pipeline), once per product
+        fg_position = {p.name: dc_stock[p.name][:, 1:].sum(axis=1) + dc_pipeline[p.name] for p in products}
         for m in materials:
             on_hand = rm_stock[m.name][:, 1:].sum(axis=1)
-            pipeline = rm_arrivals[m.name][:, t + 1:].sum(axis=1)
+            pipeline = rm_pipeline[m.name].copy()
             downstream = np.zeros(n)                       # RM already inside FG
             downstream_waste = np.zeros(n)                 # ... of which expected to expire at the DC
-            users = model.products_using(m.name)
+            users = users_of[m.name]
             for p in users:
-                fg_position = dc_stock[p.name][:, 1:].sum(axis=1) + dc_arrivals[p.name][:, t + 1:].sum(axis=1)
-                downstream += p.bom[m.name] * fg_position
+                downstream += p.bom[m.name] * fg_position[p.name]
                 downstream_waste += p.bom[m.name] * dc_expected_waste[p.name]
             echelon = on_hand + pipeline + downstream
 
             # RM expected to expire before a new supplier order arrives
-            weekly_use = [sum(p.bom[m.name] * sum(_mean_channel_demand(model, p, t + j + model.release_to_dc_median(p)))
+            weekly_use = [sum(p.bom[m.name] * sum(mean_channel_demand(p, t + j + release_to_dc_median[p.name]))
                               for p in users) for j in range(m.lead_time_median)]
             rm_waste = projected_rm_waste(rm_stock[m.name], weekly_use, m.max_shippable_age)
             effective_echelon = echelon - rm_waste - downstream_waste
@@ -497,6 +584,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                 O = np.full(n, week1_orders["rm"][m.name], dtype=np.int64)
             arrival = schedule_arrivals(rm_arrivals[m.name], rm_last_arrival[m.name], t, O,
                                         scen.rm_lead_time[m.name][:, t])
+            rm_pipeline[m.name] += np.where(arrival > t, O, 0)
 
             rec = rm_rec[m.name]
             rec["pipeline_before_order"][:, t] = pipeline
@@ -524,11 +612,12 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
         # ---------------- Step 4 + 5: demand, allocation, service ----------------
         for p in products:
             demands = [scen.demand[(p.name, c.name)][:, t] for c in p.channels]
-            max_age = [p.max_age_for_channel(c) for c in p.channels]
-            sales, lost = allocate_demand(dc_stock[p.name], demands, max_age, p.channel_priority())
+            sales, lost = allocate_demand(dc_stock[p.name], demands, channel_max_age[p.name],
+                                          channel_priority[p.name])
+            sold_by_channel = [sales[i][:, 1:].sum(axis=1) for i in range(len(demands))]
 
             for i, c in enumerate(p.channels):
-                sold = sales[i][:, 1:].sum(axis=1)
+                sold = sold_by_channel[i]
                 rec = ch_rec[(p.name, c.name)]
                 rec["demand"][:, t] = demands[i]
                 rec["sales"][:, t] = sold
@@ -542,7 +631,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                     flow(s, t, f"Channel {c.name}", "lost sales", p.name, lost[i][s],
                          "unmet demand (no physical flow)")
             dc_rec[p.name]["demand"][:, t] = sum(demands)
-            dc_rec[p.name]["sales"][:, t] = sum(sales[i][:, 1:].sum(axis=1) for i in range(len(demands)))
+            dc_rec[p.name]["sales"][:, t] = sum(sold_by_channel)
             dc_rec[p.name]["lost_sales"][:, t] = sum(lost)
 
         # ---------------- Step 6: end of week (waste, holding) ----------------
@@ -552,8 +641,9 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             stock[:, p.max_sellable_age] = 0
             dc_rec[p.name]["waste"][:, t] = waste
             dc_rec[p.name]["on_hand_end"][:, t] = stock[:, 1:].sum(axis=1)
-            dc_life[p.name][:, t] = average_remaining_life(stock, p.shelf_life)
-            dc_rec[p.name]["pipeline_end"][:, t] = dc_arrivals[p.name][:, t + 1:].sum(axis=1)
+            if report_details:
+                dc_life[p.name][:, t] = average_remaining_life(stock, p.shelf_life)
+            dc_rec[p.name]["pipeline_end"][:, t] = dc_pipeline[p.name]
             cost["FG waste"][:, t] += p.waste_cost * waste
             cost["FG holding"][:, t] += p.holding_cost * stock[:, 1:].sum(axis=1)
             for s in trace_seeds:
@@ -566,8 +656,9 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             stock[:, m.max_shippable_age] = 0
             rm_rec[m.name]["waste"][:, t] = waste
             rm_rec[m.name]["on_hand_end"][:, t] = stock[:, 1:].sum(axis=1)
-            rm_life[m.name][:, t] = average_remaining_life(stock, m.shelf_life)
-            rm_rec[m.name]["pipeline_end"][:, t] = rm_arrivals[m.name][:, t + 1:].sum(axis=1)
+            if report_details:
+                rm_life[m.name][:, t] = average_remaining_life(stock, m.shelf_life)
+            rm_rec[m.name]["pipeline_end"][:, t] = rm_pipeline[m.name]
             cost["RM waste"][:, t] += m.waste_cost * waste
             cost["RM holding"][:, t] += m.holding_cost * stock[:, 1:].sum(axis=1)
             for s in trace_seeds:
