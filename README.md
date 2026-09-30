@@ -3,7 +3,7 @@
 Simulation-optimisation model for a **perishable two-echelon supply chain with production**:
 
 ```
-Supplier r --(random lead time)--> Raw-material warehouse (RMW) --> Production (PF, no stock) --(random lead time)--> DC --> sales channels
+Supplier r --(random lead time)--> Raw-material warehouse (RMW) --(fixed lead time tau)--> Production (PF, no stock) --(random lead time)--> DC --> sales channels
                                    stock by age, perishable                                                          stock by age, perishable
 ```
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 python main.py --preset quick      # ~1-2 min, example input
 python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 67 tests
+python -m pytest -q                # 78 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:
@@ -89,8 +89,8 @@ Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` 
 2. **Receipts** (enter at age 1).
 3. **Ordering and release:**
    - **3a DC order:** the effective position (on hand + pipeline − expected waste) is compared with s; the order goes up to S, rounded to batch/MOQ, capped.
-   - **3b Release:** the order is capped by usable RM, capacity, batch and MOQ; the rest is cancelled.
-   - **3c RM transport:** oldest first, consumed at the PF.
+   - **3b Release:** the order is capped by usable RM, the capacity of the production week (release week + τ), batch and MOQ; the rest is cancelled.
+   - **3c RM transport:** oldest first; the RM leaves the RMW now and is produced τ weeks later (`rmw_to_pf_lead_time`, default 0; example: 1). The FG reaches the DC after τ + the random PF → DC lead time.
    - **3d RM order:** based on the effective echelon position, or on the physical RM position falling below its minimum.
 4. **Demand:** oldest age first; within an age, the tightest channel first (ties: higher F); unmet demand is lost.
 5. **Fill recording.**
@@ -138,5 +138,5 @@ docs/                      specification, policy choice, app integration plan
 - (s,S)-type policy with lookahead only; no global optimality claim.
 - Demand and lead times are independent over weeks; there are no disruption regimes.
 - FG shelf life is independent of RM age.
-- Capacity applies in the release week.
+- Capacity applies in the production week (release week + τ); the RMW → PF lead time τ is deterministic and the same for all materials.
 - No value is given to stock left at the end of the horizon.

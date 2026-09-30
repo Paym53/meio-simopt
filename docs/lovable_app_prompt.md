@@ -111,7 +111,10 @@ is service safe, what does it cost, what are the options), then the reasons.
 
 #### 4.1 Input JSON (scenario draft), exactly this format
 ```
-horizon (weeks H), production_capacity (units/week), capacity_overrides {"week": capacity}
+horizon (weeks H), production_capacity (units/week), capacity_overrides {"week": capacity},
+rmw_to_pf_lead_time (tau: whole weeks RMW -> production, >= 0; production week = release week + tau;
+  FG arrival = release week + tau + PF->DC lead time; capacity and closed production weeks refer to
+  the production week)
 products[]: name, shelf_life (weeks), bom {material: units per FG}, batch_size, moq,
   holding_cost (per unit-week), waste_cost (per unit), fixed_cost_per_release,
   production_tiers [{lower, upper, unit_cost}], transport_tiers [{lower, upper, unit_cost}]
@@ -130,7 +133,7 @@ Seed the "Example data" scenario with the engine's `examples/example_input.json`
 Derived quantities (compute in the app):
 - Sellable shelf life per channel = `shelf_life - min_remaining_life` (oldest age the channel
   accepts). Max shippable RM age = `shelf_life - min_life_at_shipment`.
-- L_max = largest FG lead time with probability > 0. **Evaluation window** = W(L_max+1)..WH
+- L_max = tau + largest FG lead time with probability > 0. **Evaluation window** = W(L_max+1)..WH
   (earlier weeks are fixed by what is already in the pipeline).
 - Forecast distribution per product/channel/week: negative binomial with the given mean and sd
   (`n = mean^2 / (sd^2 - mean)`, `p = n / (n + mean)`); Poisson(mean) if `sd^2 <= mean`; 0 if
@@ -326,11 +329,13 @@ where is the risk?
 
 **7.6 Lead times (Analyse).** Purpose: how long and how uncertain each link is.
 - Per FG: path Supplier -> RMW -> PF -> DC with a small probability bar chart per link, median
-  and range; the critical path (longest supplier lead time + FG lead time) highlighted.
-- Total lead time distribution per FG and RM (supplier + production), computed by convolution.
+  and range (RMW -> PF = the fixed tau, shown as one bar with probability 1); the critical path
+  (longest supplier lead time + tau + FG lead time) highlighted.
+- Total lead time distribution per FG and RM (supplier + tau + production), computed by convolution.
 - Note: lead times are random per order and order-preserving (a later order never arrives before
   an earlier one on the same link).
-- Editable here: lead-time distributions (week / probability rows, must sum to 1, live chart).
+- Editable here: lead-time distributions (week / probability rows, must sum to 1, live chart) and
+  tau (RMW -> PF, whole weeks >= 0).
 
 **7.7 BOM navigator (Analyse).** Purpose: trace raw materials to finished goods and back.
 - Expandable tree FG -> RMs and reverse "where used" RM -> FGs, each row with KPIs: quantity per
@@ -364,7 +369,7 @@ where is the risk?
 **7.10 Data input (Configure).** Purpose: maintain all planning data of the scenario.
 - Sub-tabs: Planning horizon, Finished goods, Channels, Raw materials, Bill of materials, Lead
   times, Cost tiers, Demand forecast, Initial stock, Open orders, Capacity, History (optional).
-- Planning horizon: H (weeks). Read-only: commit week = W1, evaluation window W(L_max+1)..WH with
+- Planning horizon: H (weeks) and the RMW -> PF lead time tau (weeks) editable. Read-only: commit week = W1, evaluation window W(L_max+1)..WH with
   the explanation.
 - Master data per FG and per RM as in 4.1; each row opens a detail sheet with its stochastic
   lead-time chart and derived values (sellable shelf life per channel, max shippable age).
@@ -395,8 +400,8 @@ where is the risk?
 content; do not add claims.
 - *The weekly simulation:* 1 ageing (all stock one week older) -> 2 receipts (arrivals enter at
   age 1) -> 3a DC order ((s,S) on the effective DC position, order cap) -> 3b production release
-  (limited by usable RM, capacity, batch and MOQ; the rest is cancelled) -> 3c RM transport to
-  production (oldest first) -> 3d RM order ((s,S) on the effective echelon position, plus a
+  (limited by usable RM, capacity of the production week, batch and MOQ; the rest is cancelled)
+  -> 3c RM leaves the RMW (oldest first) and reaches production tau weeks later -> 3d RM order ((s,S) on the effective echelon position, plus a
   minimum physical stock) -> 4 demand and allocation (oldest first, strictest channel first, lost
   sales) -> 5 service recording -> 6 scrap expired stock, holding cost.
 - *The policy:* age-aware (s,S): the inventory position minus the stock expected to expire before
@@ -416,7 +421,7 @@ content; do not add claims.
   are compared on the same futures (common random numbers).
 - *Assumptions and limitations:* (s,S)-type policy with lookahead, no global optimality claim;
   demand and lead times independent over weeks, no disruption regimes; FG shelf life independent
-  of RM age; capacity applies in the release week; stock left at the end of the horizon has no
+  of RM age; capacity applies in the production week (release week + tau); tau is fixed; stock left at the end of the horizon has no
   value. Scope: a planning cockpit on a simulation-optimisation engine, not a full APS.
 - *Glossary* (section 8).
 

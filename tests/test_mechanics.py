@@ -413,3 +413,134 @@ if __name__ == "__main__":
         f()
         print(f"ok   {name}")
     print(f"\nall {len(tests)} tests passed")
+
+
+# ---------------------------------------------------------------------------
+# RMW -> PF lead time (tau)
+# ---------------------------------------------------------------------------
+def _tau_model(tau, **changes):
+    from dataclasses import replace
+    return replace(_tiny_model(stock_b=500), rmw_to_pf_lead_time=tau, **changes)
+
+
+def test_rmw_to_pf_lead_time_delays_the_fg_arrival_but_rm_leaves_in_the_release_week():
+    """FG lead time 2, release of 100 in W1: arrival W3 with tau = 0, W4 with tau = 1.
+    The raw material leaves the RMW in W1 in both cases."""
+    for tau, arrival_week in ((0, 3), (1, 4)):
+        model = _tau_model(tau)
+        r = simulate(model, _tiny_schedule(model), build_scenarios(model, 2, 1, "t"))
+        receipts = r.dc["F"]["receipts"][0]
+        assert r.dc["F"]["released_P"][0, 1] == 100 and receipts[arrival_week] == 100
+        assert receipts[1:arrival_week].sum() == 0
+        assert r.rm["A"]["shipped_T"][0, 1] == 100 and r.rm["B"]["shipped_T"][0, 1] == 100
+
+
+def test_capacity_of_the_production_week_limits_the_release():
+    """tau = 1: a W1 release is produced in W2, so the capacity of W2 applies, not of W1."""
+    in_w2 = _tau_model(1, capacity_overrides={2: 30})
+    in_w1 = _tau_model(1, capacity_overrides={1: 30})
+    for model, released in ((in_w2, 30), (in_w1, 100)):
+        r = simulate(model, _tiny_schedule(model), build_scenarios(model, 2, 1, "t"))
+        assert r.dc["F"]["released_P"][0, 1] == released
+
+
+def test_order_weeks_and_evaluation_window_include_tau():
+    """H = 6, L = 2. tau = 1: last DC order week 6 - 3 = 3, a closed production week 3 blocks
+    ordering in week 2, evaluation starts after tau + L_max = 3. RM (G = 3): last week 6 - 3 - 3 = 0."""
+    from dataclasses import replace
+    from meio.policy import dc_order_weeks, rm_order_weeks
+    base = _tau_model(0)
+    closed = replace(base.products[0], closed_production_weeks=[3])
+    for tau, dc_weeks, first_eval in ((0, [1, 2, 4], 3), (1, [1, 3], 4)):
+        model = _tau_model(tau, products=[closed])
+        assert dc_order_weeks(model, model.products[0]) == dc_weeks
+        assert model.evaluation_weeks[0] == first_eval
+    assert rm_order_weeks(_tau_model(0), _tau_model(0).materials[0]) == [1]
+    assert rm_order_weeks(_tau_model(1), _tau_model(1).materials[0]) == []
+
+
+def test_expected_waste_window_covers_tau_plus_lead_time():
+    """40 units of age 3 (oldest sellable age 5), no demand. Window = tau + median L:
+    2 weeks (tau = 0) -> they do not expire in time -> 0; 3 weeks (tau = 1) -> 40 expire,
+    so the effective position drops and the order grows from 60 to 100."""
+    for tau, waste, order in ((0, 0, 60), (1, 40, 100)):
+        model = _tau_model(tau)
+        model.initial_state.dc_stock["F"] = {3: 40}
+        r = simulate(model, _tiny_schedule(model), build_scenarios(model, 2, 1, "t"))
+        assert r.dc["F"]["expected_waste"][0, 1] == waste and r.dc["F"]["ordered_Q"][0, 1] == order
+
+
+def test_open_releases_of_the_initial_state_also_need_tau():
+    """A release of 50 in week 0 with L = 2 arrives in W2 (tau = 0) or W3 (tau = 1)."""
+    for tau, week in ((0, 2), (1, 3)):
+        model = _tau_model(tau)
+        model.initial_state.dc_pipeline["F"] = [(0, 50)]
+        r = simulate(model, _tiny_schedule(model, dc_level=0), build_scenarios(model, 2, 1, "t"))
+        assert r.dc["F"]["receipts"][0, week] == 50 and r.dc["F"]["receipts"][0, 1:week].sum() == 0
+
+
+def test_heuristic_start_levels_grow_with_tau():
+    from dataclasses import replace
+    settings = SearchSettings(n_quantile_samples=1000)
+    model = build_example_input()
+    s0 = initial_schedule(replace(model, rmw_to_pf_lead_time=0), settings)
+    s1 = initial_schedule(replace(model, rmw_to_pf_lead_time=1), settings)
+    from meio.policy import dc_order_weeks
+    fg0, fg1 = replace(model, rmw_to_pf_lead_time=0), replace(model, rmw_to_pf_lead_time=1)
+    weeks = sorted(set(dc_order_weeks(fg0, fg0.products[0])) & set(dc_order_weeks(fg1, fg1.products[0])))
+    assert 17 not in dc_order_weeks(fg1, fg1.products[0])          # closed production week 18 = 17 + tau
+    assert (s1.dc_s["FG1"][weeks] > s0.dc_s["FG1"][weeks]).all()
+    for mat in ("RM_A", "RM_D"):                    # about one more week of demand to cover
+        assert (s1.rm_s[mat][1:12] - s0.rm_s[mat][1:12]).mean() >= 75
+
+
+def test_lookahead_uses_the_capacity_of_the_production_week():
+    """tau = 1 and capacity 100 in W2: DC candidates other than the rule's own quantity stay <= 100."""
+    from dataclasses import replace
+    from meio.lookahead import lookahead_week1
+    model = replace(build_example_input(), capacity_overrides={2: 100})
+    settings = SearchSettings(n_quantile_samples=1000)
+    _, rule, log = lookahead_week1(model, initial_schedule(model, settings), build_scenarios(model, 30, 9, "la"),
+                                   settings, {}, set())
+    dc = log[log["step"] == "1 DC order"]
+    assert dc[~dc["is_rule_quantity"]]["candidate"].max() <= 100
+
+
+def test_rmw_to_pf_lead_time_in_json_and_validation():
+    import json
+    from dataclasses import replace
+    from meio.config import validate_input
+    from meio.io_json import model_from_dict, model_to_dict
+    model = build_example_input()
+    assert model.rmw_to_pf_lead_time == 1
+    d = model_to_dict(model)
+    assert model_from_dict(json.loads(json.dumps(d))).rmw_to_pf_lead_time == 1
+    del d["rmw_to_pf_lead_time"]
+    assert model_from_dict(d).rmw_to_pf_lead_time == 0          # older input files: same-week
+    for bad in (-1, 1.5, "1", True, model.horizon):
+        try:
+            validate_input(replace(model, rmw_to_pf_lead_time=bad))
+        except ValueError as err:
+            assert "RMW -> PF lead time" in str(err)
+            continue
+        raise AssertionError(f"tau = {bad!r} was accepted")
+
+
+def test_feeding_release_weeks_include_tau():
+    """L = 2: FG arriving in W5 was released in W3 (tau = 0) or W2 (tau = 1)."""
+    from meio.policy import feeding_release_weeks
+    assert feeding_release_weeks(_tau_model(0), _tau_model(0).products[0], 5) == [3]
+    assert feeding_release_weeks(_tau_model(1), _tau_model(1).products[0], 5) == [2]
+
+
+def test_rm_expected_waste_uses_demand_tau_plus_lead_time_ahead():
+    """RM A: 100 units at the oldest shippable age 9, no release in W1. Demand of 100 only in W3.
+    The RM projection assumes releases serve demand tau + L weeks later, so W1's use is the
+    demand of W3 with tau = 0 (the units are used, no waste expected) but of W4 with tau = 1
+    (nothing uses them in time -> 100 expected to expire)."""
+    for tau, waste in ((0, 0), (1, 100)):
+        model = _tau_model(tau)
+        model.demand.mean[("F", "Only")][3] = 100.0
+        model.initial_state.rm_stock["A"] = {9: 100}
+        r = simulate(model, _tiny_schedule(model, dc_level=0), build_scenarios(model, 2, 1, "t"))   # no release in W1
+        assert r.rm["A"]["shipped_T"][0, 1] == 0 and r.rm["A"]["expected_waste"][0, 1] == waste

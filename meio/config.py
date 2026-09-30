@@ -60,7 +60,7 @@ class Product:
     fixed_cost_per_release: float      # charged in weeks with a release > 0
     production_tiers: list[Tier]       # conversion cost per unit (no material cost!)
     transport_tiers: list[Tier]        # PF -> DC transport cost per unit
-    lead_time_dist: dict[int, float]   # P(L~ = weeks), release -> usable at DC
+    lead_time_dist: dict[int, float]   # P(L~ = weeks), production start at PF -> usable at DC
     closed_production_weeks: list[int] = field(default_factory=list)
 
     # ----- derived quantities (read-only helpers) -----
@@ -183,6 +183,8 @@ class ModelInput:
     initial_state: InitialState
     production_capacity: int                   # FG units per week, shared by all products
     capacity_overrides: dict[int, int] = field(default_factory=dict)  # week -> capacity
+    rmw_to_pf_lead_time: int = 0               # tau: weeks for RM from the RMW to production (deterministic).
+                                               # RM shipped in week t is produced in week t + tau; 0 = same week.
 
     # ----- helpers -----
     def material(self, name: str) -> Material:
@@ -194,10 +196,26 @@ class ModelInput:
     def products_using(self, material_name: str) -> list[Product]:
         return [p for p in self.products if material_name in p.bom]
 
+    # Release -> DC: a release in week t ships RM from the RMW in week t, production starts
+    # in week t + tau, the FG is usable at the DC after the random production + transport
+    # lead time L~ on top: arrival = t + tau + L~.
+    def production_week(self, release_week: int) -> int:
+        """Week in which a release of week t is produced (capacity and closed weeks apply here)."""
+        return release_week + self.rmw_to_pf_lead_time
+
+    def release_to_dc_min(self, product: Product) -> int:
+        return self.rmw_to_pf_lead_time + product.lead_time_min
+
+    def release_to_dc_max(self, product: Product) -> int:
+        return self.rmw_to_pf_lead_time + product.lead_time_max
+
+    def release_to_dc_median(self, product: Product) -> int:
+        return self.rmw_to_pf_lead_time + product.lead_time_median
+
     @property
     def lead_time_max_global(self) -> int:
-        """L_max: largest possible DC lead time over all products."""
-        return max(p.lead_time_max for p in self.products)
+        """L_max: largest possible time from release to arrival at the DC (tau + L) over all products."""
+        return max(self.release_to_dc_max(p) for p in self.products)
 
     @property
     def evaluation_weeks(self) -> list[int]:
@@ -318,7 +336,8 @@ def build_example_input(horizon: int = 36) -> ModelInput:
     ]
 
     # Forecast must reach beyond the horizon (initial schedule looks ahead up to G + L + m0)
-    longest_look_ahead = max(m.lead_time_max for m in materials) + fg.lead_time_max + 5
+    rmw_to_pf_lead_time = 1                    # RM needs one week from the RMW to production
+    longest_look_ahead = max(m.lead_time_max for m in materials) + rmw_to_pf_lead_time + fg.lead_time_max + 5
     demand = _example_demand([fg], horizon + longest_look_ahead)
 
     # Initial state: roughly 2.5 weeks of FG on hand, one release per past week in
@@ -351,6 +370,7 @@ def build_example_input(horizon: int = 36) -> ModelInput:
         demand=demand,
         initial_state=initial,
         production_capacity=450,
+        rmw_to_pf_lead_time=rmw_to_pf_lead_time,
     )
 
 
@@ -383,6 +403,9 @@ def validate_input(model: ModelInput) -> None:
         for age in model.initial_state.rm_stock.get(m.name, {}):
             if not 1 <= age <= m.max_shippable_age:
                 problems.append(f"{m.name}: initial stock age {age} outside 1..{m.max_shippable_age}")
+    tau = model.rmw_to_pf_lead_time
+    if not isinstance(tau, int) or isinstance(tau, bool) or not 0 <= tau < model.horizon:
+        problems.append(f"RMW -> PF lead time must be a whole number of weeks, 0 <= tau < horizon (got {tau!r})")
     last_needed = model.horizon + 1
     if model.demand.last_week < last_needed:
         problems.append("demand forecast is shorter than the horizon")

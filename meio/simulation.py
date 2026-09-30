@@ -7,9 +7,10 @@ seed. The weekly steps are:
   Step 1  ageing                  (all stock one week older)
   Step 2  receipts                (supplier -> RMW, production -> DC, enter at age 1)
   Step 3a DC ordering             (s,S rule on the effective DC position, order cap)
-  Step 3b production release      (capped by usable RM, capacity, batch size and MOQ;
-                                   the rest is cancelled)
-  Step 3c RM transport            (RMW -> PF in the release week, oldest first)
+  Step 3b production release      (capped by usable RM, capacity of the production week,
+                                   batch size and MOQ; the rest is cancelled)
+  Step 3c RM transport            (leaves the RMW in the release week, oldest first; reaches
+                                   production tau weeks later, FG at the DC after tau + L~)
   Step 3d RMW ordering            (s,S rule on the effective echelon position,
                                    minimum physical RM stock)
   Step 4  demand and allocation   (oldest age first; within an age the strictest
@@ -261,7 +262,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
         dc_stock[p.name] = np.zeros((n, p.max_sellable_age + 1), dtype=np.int64)
         for age, qty in model.initial_state.dc_stock.get(p.name, {}).items():
             dc_stock[p.name][:, age] = qty
-        dc_arrivals[p.name] = np.zeros((n, H + p.lead_time_max + 2), dtype=np.int64)
+        dc_arrivals[p.name] = np.zeros((n, H + model.release_to_dc_max(p) + 2), dtype=np.int64)
         dc_last_arrival[p.name] = np.zeros(n, dtype=np.int64)
         # open releases from before week 1 (order-preserving among themselves)
         pipeline = model.initial_state.dc_pipeline.get(p.name, [])
@@ -347,7 +348,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             position = on_hand + pipeline
 
             # subtract stock expected to expire before a new order arrives
-            window = [_mean_channel_demand(model, p, t + w) for w in range(p.lead_time_median)]
+            window = [_mean_channel_demand(model, p, t + w) for w in range(model.release_to_dc_median(p))]
             expected_waste = projected_fg_waste(dc_stock[p.name], window,
                                                  [p.max_age_for_channel(c) for c in p.channels],
                                                  p.channel_priority())
@@ -380,7 +381,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
 
         # ---------------- Step 3b + 3c: release, cancellation, RM transport ----------------
         usable_rm = {m.name: rm_stock[m.name][:, 1:].sum(axis=1) for m in materials}
-        capacity_left = np.full(n, model.capacity_in_week(t), dtype=np.int64)
+        production_week = model.production_week(t)      # RM reaches production tau weeks later
+        capacity_left = np.full(n, model.capacity_in_week(production_week), dtype=np.int64)
         shipped_total = {m.name: np.zeros(n, dtype=np.int64) for m in materials}
         shipped_by_age = {m.name: np.zeros_like(rm_stock[m.name]) for m in materials}
 
@@ -409,7 +411,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                 shipped_total[mat_name] += per_unit * P
                 usable_rm[mat_name] -= per_unit * P
 
-            arrival = schedule_arrivals(dc_arrivals[p.name], dc_last_arrival[p.name], t, P,
+            arrival = schedule_arrivals(dc_arrivals[p.name], dc_last_arrival[p.name], production_week, P,
                                         scen.dc_lead_time[p.name][:, t])
 
             rec = dc_rec[p.name]
@@ -419,6 +421,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             rec["cut_by_rm"][:, t] = rm_binding
             rec["cut_by_capacity"][:, t] = capacity_binding
 
+            # production costs are booked in the release week (the decision week)
             cost["Production fixed"][:, t] += p.fixed_cost_per_release * (P > 0)
             cost["Production variable"][:, t] += tier_unit_cost(P, p.production_tiers) * P
             cost["PF->DC transport"][:, t] += tier_unit_cost(P, p.transport_tiers) * P
@@ -433,14 +436,16 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                          "cut_reason": ("raw material" if rm_binding[s] else
                                                         "capacity" if capacity_binding[s] else ""),
                                          "lead_time_draw": lead,
-                                         "planned_arrival": t + lead if P[s] > 0 else None,
+                                         "planned_arrival": production_week + lead if P[s] > 0 else None,
                                          "actual_arrival": int(arrival[s]) if P[s] > 0 else None,
-                                         "held_up_by_earlier_order": bool(P[s] > 0 and arrival[s] > t + lead)})
+                                         "held_up_by_earlier_order": bool(P[s] > 0 and arrival[s] > production_week + lead)})
                 for mat_name, per_unit in p.bom.items():
-                    flow(s, t, "RMW", "PF", mat_name, per_unit * P[s], f"shipped for release of {p.name}")
-                    flow(s, t, "PF", "consumed", mat_name, per_unit * P[s], f"transformed into {p.name}")
+                    flow(s, t, "RMW", "PF", mat_name, per_unit * P[s],
+                         f"shipped for release of {p.name}; reaches production in week {production_week}")
+                    flow(s, t, "PF", "consumed", mat_name, per_unit * P[s],
+                         f"transformed into {p.name} in week {production_week}")
                 flow(s, t, "PF", "In transit (PF -> DC)", p.name, P[s],
-                     f"produced; arrives in week {int(arrival[s])}" if P[s] > 0 else "")
+                     f"produced in week {production_week}; arrives in week {int(arrival[s])}" if P[s] > 0 else "")
                 if cancelled[s] > 0:
                     reason = "raw material short" if rm_binding[s] else "capacity exhausted"
                     flow(s, t, "DC order", "cancelled", p.name, cancelled[s],
@@ -464,7 +469,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             echelon = on_hand + pipeline + downstream
 
             # RM expected to expire before a new supplier order arrives
-            weekly_use = [sum(p.bom[m.name] * sum(_mean_channel_demand(model, p, t + j + p.lead_time_median))
+            weekly_use = [sum(p.bom[m.name] * sum(_mean_channel_demand(model, p, t + j + model.release_to_dc_median(p)))
                               for p in users) for j in range(m.lead_time_median)]
             rm_waste = projected_rm_waste(rm_stock[m.name], weekly_use, m.max_shippable_age)
             effective_echelon = echelon - rm_waste - downstream_waste

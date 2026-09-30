@@ -77,13 +77,15 @@ def lookahead_week1(model: ModelInput, schedule: PolicySchedule,
     orders = {"dc": dict(rule_orders["dc"]), "rm": dict(rule_orders["rm"])}
     log: list[dict] = []
 
-    # --- DC orders: 0, MOQ, MOQ + batches ... up to what RM and capacity allow in week 1
+    # --- DC orders: 0, MOQ, MOQ + batches ... up to what RM (at the RMW now) and the
+    #     capacity of the production week of a W1 release (week 1 + tau) allow
     usable = {m.name: sum(model.initial_state.rm_stock.get(m.name, {}).values()) for m in model.materials}
+    production_week = model.production_week(1)
     for p in model.products:
-        feasible = min([usable[r] // a for r, a in p.bom.items()] + [model.capacity_in_week(1)])
+        feasible = min([usable[r] // a for r, a in p.bom.items()] + [model.capacity_in_week(production_week)])
         feasible = (feasible // p.batch_size) * p.batch_size
         candidates = {0, rule_orders["dc"][p.name]}
-        if feasible >= p.moq and 1 not in p.closed_production_weeks:
+        if feasible >= p.moq and production_week not in p.closed_production_weeks:
             candidates.update(range(p.moq, feasible + 1, p.batch_size))
         orders["dc"][p.name] = _choose("1 DC order", p.name, sorted(candidates), rule_orders["dc"][p.name],
                                        orders, "dc", model, schedule, seeds, settings, margins,

@@ -16,13 +16,15 @@ def _title(text: str) -> None:
 
 def print_inputs(model: ModelInput, settings: SearchSettings) -> None:
     _title("MEIO SIMULATION-OPTIMISATION  -  input overview")
-    print(f"Horizon: {model.horizon} weeks | L_max = {model.lead_time_max_global} | "
+    print(f"Horizon: {model.horizon} weeks | RMW -> PF lead time = {model.rmw_to_pf_lead_time} wk | "
+          f"L_max = {model.lead_time_max_global} | "
           f"evaluation window: weeks {model.evaluation_weeks[0]}-{model.evaluation_weeks[-1]}")
     print(f"Seeds: search {settings.n_search_seeds}, hold-out {settings.n_holdout_seeds}, "
           f"test {settings.n_test_seeds} | Z = {settings.z}")
     for p in model.products:
         print(f"\nFinished good {p.name}: shelf life {p.shelf_life} wk, batch {p.batch_size}, MOQ {p.moq}, "
-              f"DC lead time {p.lead_time_min}-{p.lead_time_max} wk, closed weeks {p.closed_production_weeks}")
+              f"PF -> DC lead time {p.lead_time_min}-{p.lead_time_max} wk (release -> DC "
+              f"{model.release_to_dc_min(p)}-{model.release_to_dc_max(p)} wk), closed weeks {p.closed_production_weeks}")
         for i in p.channel_priority():
             c = p.channels[i]
             print(f"   channel {c.name:<8} F = {c.target_fill_rate:.2f}, accepts age <= {p.max_age_for_channel(c)}")

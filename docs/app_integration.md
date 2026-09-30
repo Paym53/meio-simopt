@@ -21,7 +21,7 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 ## 2. The contract (already implemented)
 
 **Input.** A JSON document as in `examples/example_input.json`, described at the top of `meio/io_json.py`.
-- `horizon`, `production_capacity`, `capacity_overrides`
+- `horizon`, `production_capacity`, `capacity_overrides`, `rmw_to_pf_lead_time` (weeks from RMW to production, whole number ≥ 0, optional, default 0; the FG reaches the DC after this plus the PF → DC lead time; capacity and closed production weeks refer to the production week)
 - `products`: shelf life, channels (target fill rate, minimum remaining life), BOM, batch size / MOQ, costs, discount tiers, lead-time distribution, closed weeks
 - `materials`: shelf life, batch size / MOQ, costs, lead-time distribution, supplier capacity, closed weeks
 - `demand_forecast[product][channel] = {mean: [...], sd: [...]}`, one value per week starting at week 1

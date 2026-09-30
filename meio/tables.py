@@ -22,7 +22,10 @@ from .simulation import CHANNEL_SERIES, DC_SERIES, RM_SERIES, SimResult
 def settings_table(model: ModelInput, settings: SearchSettings, extra: dict) -> pd.DataFrame:
     rows = [
         ("Horizon H [weeks]", model.horizon, "simulated weeks, week 1 = current review week"),
-        ("L_max (global) [weeks]", model.lead_time_max_global, "largest possible DC lead time over all products"),
+        ("RMW -> PF lead time tau [weeks]", model.rmw_to_pf_lead_time,
+         "RM shipped in week t is produced in week t + tau (capacity and closed weeks of that week apply)"),
+        ("L_max (global) [weeks]", model.lead_time_max_global,
+         "largest possible time from release to arrival at the DC (tau + PF -> DC lead time)"),
         ("Evaluation window", f"weeks {model.evaluation_weeks[0]}-{model.evaluation_weeks[-1]}",
          "service is only evaluated after L_max weeks"),
         ("Review period R [weeks]", 1, "every week is a review week"),
@@ -98,10 +101,11 @@ def tiers_table(model: ModelInput) -> pd.DataFrame:
 
 
 def lead_time_table(model: ModelInput) -> pd.DataFrame:
-    rows = []
+    rows = [{"lane": "RMW -> PF (shipment to production, deterministic)", "item": "all",
+             "lead_time_weeks": model.rmw_to_pf_lead_time, "probability": 1.0}]
     for p in model.products:
         for weeks, prob in sorted(p.lead_time_dist.items()):
-            rows.append({"lane": "PF -> DC (release to usable at DC)", "item": p.name,
+            rows.append({"lane": "PF -> DC (production start to usable at DC)", "item": p.name,
                          "lead_time_weeks": weeks, "probability": prob})
     for m in model.materials:
         for weeks, prob in sorted(m.lead_time_dist.items()):

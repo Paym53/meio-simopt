@@ -16,6 +16,8 @@ Input format (all weeks are numbered from 1 = current review week):
   "horizon": 36,
   "production_capacity": 450,
   "capacity_overrides": {"18": 0},                           # optional: week -> capacity
+  "rmw_to_pf_lead_time": 1,                                  # optional (default 0): weeks from RMW to
+                                                             # production; FG arrival = release + this + L~
   "products": [ {name, shelf_life, channels: [{name, min_remaining_life, target_fill_rate}],
                  bom: {material: units per FG}, batch_size, moq, holding_cost, waste_cost,
                  fixed_cost_per_release, production_tiers: [{lower, upper, unit_cost}],
@@ -70,6 +72,7 @@ def model_to_dict(model: ModelInput) -> dict:
         "horizon": model.horizon,
         "production_capacity": model.production_capacity,
         "capacity_overrides": {str(k): v for k, v in model.capacity_overrides.items()},
+        "rmw_to_pf_lead_time": model.rmw_to_pf_lead_time,
         "products": products,
         "materials": materials,
         "demand_forecast": forecast,
@@ -126,7 +129,8 @@ def model_from_dict(d: dict) -> ModelInput:
     return ModelInput(horizon=d["horizon"], products=products, materials=materials,
                       demand=DemandForecast(mean=mean, sd=sd), initial_state=state,
                       production_capacity=d["production_capacity"],
-                      capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()})
+                      capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()},
+                      rmw_to_pf_lead_time=d.get("rmw_to_pf_lead_time", 0))   # missing = 0 (same-week)
 
 
 def save_json(data: dict, path: str) -> None:
