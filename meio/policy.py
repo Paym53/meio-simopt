@@ -42,16 +42,25 @@ class PolicySchedule:
 # Weeks in which ordering is possible (rule C19 + calendars)
 # ---------------------------------------------------------------------------
 def dc_order_weeks(model: ModelInput, product: Product) -> list[int]:
-    """Weeks in which the DC may order product f: production open and the
-    earliest possible arrival (t + L_min) still inside the horizon."""
-    last = model.horizon - product.lead_time_min
-    return [t for t in range(1, last + 1) if t not in product.closed_production_weeks]
+    """Weeks in which the DC may order product f: production open in the production
+    week t + tau_p and the earliest possible arrival (t + tau_p + L_min) still inside the horizon."""
+    last = model.horizon - model.release_to_dc_min(product)
+    return [t for t in range(1, last + 1)
+            if model.production_week(product, t) not in product.closed_production_weeks]
+
+
+def feeding_release_weeks(model: ModelInput, product: Product, week: int) -> list[int]:
+    """Release weeks whose FG can arrive at the DC in `week`: week - (tau_p + L_max) ...
+    week - (tau_p + L_min), restricted to weeks in which the DC may order."""
+    allowed = set(dc_order_weeks(model, product))
+    return [r for r in range(week - model.release_to_dc_max(product), week - model.release_to_dc_min(product) + 1)
+            if r in allowed]
 
 
 def rm_order_weeks(model: ModelInput, material: Material) -> list[int]:
     """Weeks in which the RMW may order material r: supplier accepts orders and
-    the material can still reach the DC as FG inside the horizon (t + G_min + L_min <= H)."""
-    l_min = min(p.lead_time_min for p in model.products_using(material.name))
+    the material can still reach the DC as FG inside the horizon (t + G_min + tau_p + L_min <= H)."""
+    l_min = min(model.release_to_dc_min(p) for p in model.products_using(material.name))
     last = model.horizon - material.lead_time_min - l_min
     return [t for t in range(1, last + 1) if t not in material.closed_order_weeks]
 
@@ -88,9 +97,11 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
     S = q0-quantile over the interval plus m0 extra weeks. The intervals use random
     lead times, so the start reflects both forecast and lead-time uncertainty.
 
-    DC  interval for an order in week t: weeks t .. t + L~
-    RMW interval for an order in week t: weeks t .. t + G~ + L~   (times BOM quantity)
+    DC  interval for an order in week t: weeks t .. t + tau_p + L~
+    RMW interval for an order in week t: weeks t .. t + G~ + tau_p + L~   (times BOM quantity)
+    (tau_p = RMW -> PF time of the product's slowest BOM material, deterministic)
     """
+    tau = {p.name: model.rmw_to_pf_lead_time(p) for p in model.products}
     rng = np.random.default_rng(settings.base_seed + 999)   # own stream, never reused
     n, H, m0 = settings.n_quantile_samples, model.horizon, settings.initial_extra_cover_weeks
 
@@ -105,7 +116,7 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
         s_arr = np.zeros(H + 1, dtype=np.int64)
         S_arr = np.zeros(H + 1, dtype=np.int64)
         for t in dc_order_weeks(model, p):
-            L = sample_lead_time(p.lead_time_dist, n, rng)
+            L = tau[p.name] + sample_lead_time(p.lead_time_dist, n, rng)
             s_val = np.quantile(_window_sum(cumulative[p.name], t, t + L), q0)
             S_val = np.quantile(_window_sum(cumulative[p.name], t, t + L + m0), q0)
             s_arr[t] = _round_up(s_val, p.batch_size)
@@ -122,7 +133,7 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
             G = sample_lead_time(m.lead_time_dist, n, rng)
             need_s, need_S = np.zeros(n), np.zeros(n)
             for p in users:
-                L = sample_lead_time(p.lead_time_dist, n, rng)
+                L = tau[p.name] + sample_lead_time(p.lead_time_dist, n, rng)
                 need_s += p.bom[m.name] * _window_sum(cumulative[p.name], t, t + G + L)
                 need_S += p.bom[m.name] * _window_sum(cumulative[p.name], t, t + G + L + m0)
             s_arr[t] = _round_up(np.quantile(need_s, q0), m.batch_size)

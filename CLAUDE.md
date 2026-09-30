@@ -14,7 +14,7 @@ Simulation-optimisation model for a perishable two-echelon supply chain: supplie
 ## Commands
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                         # must pass before every commit (67+ tests)
+python -m pytest -q                         # must pass before every commit (80+ tests)
 python main.py --preset quick               # end-to-end check, ~1-2 min, writes output/run_*/
 python main.py --input examples/example_input.json --preset quick
 python api.py                               # web API on http://localhost:8000/docs (tests: tests/test_api.py)
@@ -28,6 +28,7 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 - **Weekly order of steps** in `simulation.simulate`: 1 ageing, 2 receipts, 3a DC order, 3b release, 3c RM transport, 3d RM order, 4 demand, 5 fill, 6 waste and holding. Keep the step comments.
 - **Allocation.** Oldest age first; within an age, the channel with the tightest shelf-life requirement first (ties: higher target fill rate). Lost sales.
 - **Lead times.** Random and order-preserving. Lead times are drawn per order week, which keeps common random numbers across candidate policies.
+- **RMW -> PF lead time τ_r per material** (`materials[].rmw_to_pf_lead_time`, deterministic, default 0). All BOM materials leave the RMW in the release week t; production starts when the slowest has arrived, in week t+τ_p with τ_p = max τ_r over the BOM (`ModelInput.rmw_to_pf_lead_time(p)`); its capacity (booked per production week, shared across products) and closed weeks apply; FG arrives at t+τ_p+L~. Every lead-time-based quantity uses τ_p+L (`ModelInput.release_to_dc_*`, `production_week`, `policy.feeding_release_weeks`); all τ_r = 0 must reproduce the original model exactly.
 - **Fill-rate rules** (`meio/service.py`):
   - search: `mean - Z*SE - margin >= F`;
   - hold-out: weak if `mean < F`, then `margin += max(bump, F - mean)`;

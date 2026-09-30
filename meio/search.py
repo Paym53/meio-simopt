@@ -26,7 +26,7 @@ import pandas as pd
 
 from . import service
 from .config import ModelInput, SearchSettings
-from .policy import PolicySchedule, dc_order_weeks, initial_schedule, rm_order_weeks
+from .policy import PolicySchedule, dc_order_weeks, feeding_release_weeks, initial_schedule, rm_order_weeks
 from .scenarios import ScenarioSet
 from .simulation import SimResult, simulate
 
@@ -162,7 +162,7 @@ class Searcher:
         model, st = self.model, self.settings
         p = next(x for x in model.products if x.name == product_name)
         allowed_dc = set(dc_order_weeks(model, p))
-        release_weeks = [r for r in range(week - p.lead_time_max, week - p.lead_time_min + 1) if r in allowed_dc]
+        release_weeks = feeding_release_weeks(model, p, week)
         if not release_weeks:
             return False, "no release week can still reach this week"
 

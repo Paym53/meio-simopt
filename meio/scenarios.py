@@ -24,7 +24,7 @@ class ScenarioSet:
     name: str
     n_seeds: int
     demand: dict[tuple[str, str], np.ndarray]     # (product, channel) -> int (n_seeds, H+1)
-    dc_lead_time: dict[str, np.ndarray]           # product  -> int (n_seeds, H+1): draw for a release in week t
+    dc_lead_time: dict[str, np.ndarray]           # product  -> int (n_seeds, H+1): draw of L~ for a release in week t (without tau)
     rm_lead_time: dict[str, np.ndarray]           # material -> int (n_seeds, H+1): draw for an order in week t
     dc_pipeline_arrival: dict[str, list[np.ndarray]]  # product  -> one (n_seeds,) array per open release
     rm_pipeline_arrival: dict[str, list[np.ndarray]]  # material -> one (n_seeds,) array per open order
@@ -99,12 +99,14 @@ def build_scenarios(model: ModelInput, n_seeds: int, rng_seed: int, name: str) -
 
     # Open orders of the initial state: they have not arrived by week 1, so their
     # arrival week is at least 2 -> lead time >= 2 - order_week (conditional draw).
+    # FG releases also need the RMW -> PF time tau_p: arrival = release week + tau_p + L~.
     dc_pipe = {}
     for p in model.products:
+        tau = model.rmw_to_pf_lead_time(p)
         dc_pipe[p.name] = []
         for order_week, _qty in model.initial_state.dc_pipeline.get(p.name, []):
-            lt = sample_lead_time(p.lead_time_dist, n_seeds, rng, at_least=2 - order_week)
-            dc_pipe[p.name].append(order_week + lt)
+            lt = sample_lead_time(p.lead_time_dist, n_seeds, rng, at_least=2 - order_week - tau)
+            dc_pipe[p.name].append(order_week + tau + lt)
     rm_pipe = {}
     for m in model.materials:
         rm_pipe[m.name] = []

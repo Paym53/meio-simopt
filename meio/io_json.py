@@ -23,7 +23,9 @@ Input format (all weeks are numbered from 1 = current review week):
                  closed_production_weeks: [...]} ],
   "materials": [ {name, shelf_life, min_life_at_shipment, batch_size, moq, unit_cost,
                   fixed_order_cost, holding_cost, waste_cost, transport_cost,
-                  lead_time_dist: {"weeks": probability}, supplier_capacity, closed_order_weeks} ],
+                  lead_time_dist: {"weeks": probability}, supplier_capacity, closed_order_weeks,
+                  rmw_to_pf_lead_time} ],        # optional (default 0): weeks from the RMW to production;
+                                                 # a product is produced when its slowest material arrives
   "demand_forecast": {product: {channel: {"mean": [week 1, week 2, ...], "sd": [...]}}},
   "initial_state": {"dc_stock": {product: {"age": units}}, "rm_stock": {material: {"age": units}},
                     "dc_pipeline": {product: [[release_week, units], ...]},
@@ -108,6 +110,7 @@ def model_from_dict(d: dict) -> ModelInput:
             waste_cost=m["waste_cost"], transport_cost=m["transport_cost"],
             lead_time_dist=dist(m["lead_time_dist"]), supplier_capacity=m.get("supplier_capacity"),
             closed_order_weeks=list(m.get("closed_order_weeks", [])),
+            rmw_to_pf_lead_time=m.get("rmw_to_pf_lead_time", 0),      # missing = 0 (same week)
         ))
 
     mean, sd = {}, {}

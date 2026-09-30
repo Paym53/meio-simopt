@@ -22,7 +22,8 @@ from .simulation import CHANNEL_SERIES, DC_SERIES, RM_SERIES, SimResult
 def settings_table(model: ModelInput, settings: SearchSettings, extra: dict) -> pd.DataFrame:
     rows = [
         ("Horizon H [weeks]", model.horizon, "simulated weeks, week 1 = current review week"),
-        ("L_max (global) [weeks]", model.lead_time_max_global, "largest possible DC lead time over all products"),
+        ("L_max (global) [weeks]", model.lead_time_max_global,
+         "largest possible time from release to arrival at the DC (tau_p + PF -> DC lead time)"),
         ("Evaluation window", f"weeks {model.evaluation_weeks[0]}-{model.evaluation_weeks[-1]}",
          "service is only evaluated after L_max weeks"),
         ("Review period R [weeks]", 1, "every week is a review week"),
@@ -57,6 +58,7 @@ def products_table(model: ModelInput) -> tuple[pd.DataFrame, pd.DataFrame]:
             "batch_size": p.batch_size, "MOQ": p.moq, "holding_cost/unit/week": p.holding_cost,
             "waste_cost/unit": p.waste_cost, "fixed_cost/release": p.fixed_cost_per_release,
             "lead_time_min": p.lead_time_min, "lead_time_max": p.lead_time_max,
+            "rmw_to_pf_lead_time (slowest BOM material)": model.rmw_to_pf_lead_time(p),
             "closed_production_weeks": str(p.closed_production_weeks),
         })
         priority = p.channel_priority()
@@ -82,6 +84,7 @@ def materials_table(model: ModelInput) -> pd.DataFrame:
             "transport_cost RMW->PF/unit": m.transport_cost,
             "supplier_capacity/order": m.supplier_capacity if m.supplier_capacity else "unlimited",
             "lead_time_min": m.lead_time_min, "lead_time_max": m.lead_time_max,
+            "rmw_to_pf_lead_time": m.rmw_to_pf_lead_time,
             "closed_order_weeks": str(m.closed_order_weeks),
         })
     return pd.DataFrame(rows)
@@ -98,10 +101,11 @@ def tiers_table(model: ModelInput) -> pd.DataFrame:
 
 
 def lead_time_table(model: ModelInput) -> pd.DataFrame:
-    rows = []
+    rows = [{"lane": "RMW -> PF (shipment to production, deterministic)", "item": m.name,
+             "lead_time_weeks": m.rmw_to_pf_lead_time, "probability": 1.0} for m in model.materials]
     for p in model.products:
         for weeks, prob in sorted(p.lead_time_dist.items()):
-            rows.append({"lane": "PF -> DC (release to usable at DC)", "item": p.name,
+            rows.append({"lane": "PF -> DC (production start to usable at DC)", "item": p.name,
                          "lead_time_weeks": weeks, "probability": prob})
     for m in model.materials:
         for weeks, prob in sorted(m.lead_time_dist.items()):
