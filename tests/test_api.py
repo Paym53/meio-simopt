@@ -203,7 +203,11 @@ def test_wrapped_body_with_extra_keys_or_bad_input_is_rejected(client):
 
 
 def test_invalid_rmw_to_pf_lead_time_is_rejected(client):
-    r = client.post("/runs", json={**EXAMPLE, "rmw_to_pf_lead_time": -1})
+    def with_tau(tau):
+        body = json.loads(json.dumps(EXAMPLE))
+        body["materials"][0]["rmw_to_pf_lead_time"] = tau
+        return body
+    r = client.post("/runs", json=with_tau(-1))
     assert r.status_code == 422 and "RMW -> PF lead time" in r.json()["detail"] and client.calls == []
-    r = client.post("/runs", json={**EXAMPLE, "rmw_to_pf_lead_time": 2})
-    assert r.status_code == 200 and client.calls[0][0].rmw_to_pf_lead_time == 2
+    r = client.post("/runs", json=with_tau(2))
+    assert r.status_code == 200 and client.calls[0][0].materials[0].rmw_to_pf_lead_time == 2

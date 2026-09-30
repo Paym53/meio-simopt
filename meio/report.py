@@ -16,13 +16,13 @@ def _title(text: str) -> None:
 
 def print_inputs(model: ModelInput, settings: SearchSettings) -> None:
     _title("MEIO SIMULATION-OPTIMISATION  -  input overview")
-    print(f"Horizon: {model.horizon} weeks | RMW -> PF lead time = {model.rmw_to_pf_lead_time} wk | "
-          f"L_max = {model.lead_time_max_global} | "
+    print(f"Horizon: {model.horizon} weeks | L_max = {model.lead_time_max_global} | "
           f"evaluation window: weeks {model.evaluation_weeks[0]}-{model.evaluation_weeks[-1]}")
     print(f"Seeds: search {settings.n_search_seeds}, hold-out {settings.n_holdout_seeds}, "
           f"test {settings.n_test_seeds} | Z = {settings.z}")
     for p in model.products:
         print(f"\nFinished good {p.name}: shelf life {p.shelf_life} wk, batch {p.batch_size}, MOQ {p.moq}, "
+              f"RMW -> PF {model.rmw_to_pf_lead_time(p)} wk (slowest BOM material), "
               f"PF -> DC lead time {p.lead_time_min}-{p.lead_time_max} wk (release -> DC "
               f"{model.release_to_dc_min(p)}-{model.release_to_dc_max(p)} wk), closed weeks {p.closed_production_weeks}")
         for i in p.channel_priority():
@@ -32,7 +32,7 @@ def print_inputs(model: ModelInput, settings: SearchSettings) -> None:
     print("\nRaw materials:")
     for m in model.materials:
         print(f"   {m.name}: shelf life {m.shelf_life} wk, batch {m.batch_size}, MOQ {m.moq}, "
-              f"supplier lead time {m.lead_time_min}-{m.lead_time_max} wk")
+              f"supplier lead time {m.lead_time_min}-{m.lead_time_max} wk, RMW -> PF {m.rmw_to_pf_lead_time} wk")
 
 
 def print_results(model: ModelInput, decisions: pd.DataFrame, schedule_df: pd.DataFrame,

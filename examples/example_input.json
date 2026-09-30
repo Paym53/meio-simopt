@@ -2,7 +2,6 @@
   "horizon": 36,
   "production_capacity": 450,
   "capacity_overrides": {},
-  "rmw_to_pf_lead_time": 1,
   "products": [
     {
       "name": "FG1",
@@ -99,7 +98,8 @@
         "12": 0.1
       },
       "supplier_capacity": null,
-      "closed_order_weeks": []
+      "closed_order_weeks": [],
+      "rmw_to_pf_lead_time": 1
     },
     {
       "name": "RM_B",
@@ -118,7 +118,8 @@
         "8": 0.3
       },
       "supplier_capacity": null,
-      "closed_order_weeks": []
+      "closed_order_weeks": [],
+      "rmw_to_pf_lead_time": 1
     },
     {
       "name": "RM_C",
@@ -137,7 +138,8 @@
         "14": 0.3
       },
       "supplier_capacity": null,
-      "closed_order_weeks": []
+      "closed_order_weeks": [],
+      "rmw_to_pf_lead_time": 1
     },
     {
       "name": "RM_D",
@@ -156,7 +158,8 @@
         "6": 0.2
       },
       "supplier_capacity": null,
-      "closed_order_weeks": []
+      "closed_order_weeks": [],
+      "rmw_to_pf_lead_time": 1
     }
   ],
   "demand_forecast": {

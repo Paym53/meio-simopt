@@ -109,6 +109,7 @@ class Material:
     lead_time_dist: dict[int, float]   # P(G~ = weeks), order -> usable at RMW
     supplier_capacity: int | None = None      # max per order, None = unlimited
     closed_order_weeks: list[int] = field(default_factory=list)
+    rmw_to_pf_lead_time: int = 0       # tau_r: weeks from the RMW to production (deterministic, 0 = same week)
 
     @property
     def max_shippable_age(self) -> int:
@@ -183,8 +184,6 @@ class ModelInput:
     initial_state: InitialState
     production_capacity: int                   # FG units per week, shared by all products
     capacity_overrides: dict[int, int] = field(default_factory=dict)  # week -> capacity
-    rmw_to_pf_lead_time: int = 0               # tau: weeks for RM from the RMW to production (deterministic).
-                                               # RM shipped in week t is produced in week t + tau; 0 = same week.
 
     # ----- helpers -----
     def material(self, name: str) -> Material:
@@ -196,25 +195,30 @@ class ModelInput:
     def products_using(self, material_name: str) -> list[Product]:
         return [p for p in self.products if material_name in p.bom]
 
-    # Release -> DC: a release in week t ships RM from the RMW in week t, production starts
-    # in week t + tau, the FG is usable at the DC after the random production + transport
-    # lead time L~ on top: arrival = t + tau + L~.
-    def production_week(self, release_week: int) -> int:
+    # Release -> DC: a release in week t ships all BOM materials from the RMW in week t.
+    # Material r needs tau_r weeks to production; production starts when the slowest one has
+    # arrived, in week t + tau_p with tau_p = max over the BOM of tau_r. The FG is usable at the
+    # DC after the random production + transport lead time L~ on top: arrival = t + tau_p + L~.
+    def rmw_to_pf_lead_time(self, product: Product) -> int:
+        """tau_p: weeks from release to production start = slowest BOM material's RMW -> PF time."""
+        return max((self.material(m).rmw_to_pf_lead_time for m in product.bom), default=0)
+
+    def production_week(self, product: Product, release_week: int) -> int:
         """Week in which a release of week t is produced (capacity and closed weeks apply here)."""
-        return release_week + self.rmw_to_pf_lead_time
+        return release_week + self.rmw_to_pf_lead_time(product)
 
     def release_to_dc_min(self, product: Product) -> int:
-        return self.rmw_to_pf_lead_time + product.lead_time_min
+        return self.rmw_to_pf_lead_time(product) + product.lead_time_min
 
     def release_to_dc_max(self, product: Product) -> int:
-        return self.rmw_to_pf_lead_time + product.lead_time_max
+        return self.rmw_to_pf_lead_time(product) + product.lead_time_max
 
     def release_to_dc_median(self, product: Product) -> int:
-        return self.rmw_to_pf_lead_time + product.lead_time_median
+        return self.rmw_to_pf_lead_time(product) + product.lead_time_median
 
     @property
     def lead_time_max_global(self) -> int:
-        """L_max: largest possible time from release to arrival at the DC (tau + L) over all products."""
+        """L_max: largest possible time from release to arrival at the DC (tau_p + L) over all products."""
         return max(self.release_to_dc_max(p) for p in self.products)
 
     @property
@@ -323,21 +327,25 @@ def build_example_input(horizon: int = 36) -> ModelInput:
     materials = [
         Material("RM_A", shelf_life=26, min_life_at_shipment=1, batch_size=50, moq=200,
                  unit_cost=1.20, fixed_order_cost=120.0, holding_cost=0.020, waste_cost=1.40,
-                 transport_cost=0.05, lead_time_dist={9: 0.2, 10: 0.5, 11: 0.2, 12: 0.1}),
+                 transport_cost=0.05, lead_time_dist={9: 0.2, 10: 0.5, 11: 0.2, 12: 0.1},
+                 rmw_to_pf_lead_time=1),
         Material("RM_B", shelf_life=20, min_life_at_shipment=1, batch_size=100, moq=300,
                  unit_cost=0.80, fixed_order_cost=80.0, holding_cost=0.015, waste_cost=1.00,
-                 transport_cost=0.05, lead_time_dist={6: 0.3, 7: 0.4, 8: 0.3}),
+                 transport_cost=0.05, lead_time_dist={6: 0.3, 7: 0.4, 8: 0.3},
+                 rmw_to_pf_lead_time=1),
         Material("RM_C", shelf_life=30, min_life_at_shipment=1, batch_size=50, moq=500,
                  unit_cost=2.50, fixed_order_cost=250.0, holding_cost=0.040, waste_cost=2.70,
-                 transport_cost=0.05, lead_time_dist={10: 0.3, 12: 0.4, 14: 0.3}),
+                 transport_cost=0.05, lead_time_dist={10: 0.3, 12: 0.4, 14: 0.3},
+                 rmw_to_pf_lead_time=1),
         Material("RM_D", shelf_life=12, min_life_at_shipment=1, batch_size=25, moq=100,
                  unit_cost=0.60, fixed_order_cost=60.0, holding_cost=0.012, waste_cost=0.80,
-                 transport_cost=0.05, lead_time_dist={4: 0.5, 5: 0.3, 6: 0.2}),
+                 transport_cost=0.05, lead_time_dist={4: 0.5, 5: 0.3, 6: 0.2},
+                 rmw_to_pf_lead_time=1),
     ]
 
-    # Forecast must reach beyond the horizon (initial schedule looks ahead up to G + L + m0)
-    rmw_to_pf_lead_time = 1                    # RM needs one week from the RMW to production
-    longest_look_ahead = max(m.lead_time_max for m in materials) + rmw_to_pf_lead_time + fg.lead_time_max + 5
+    # Forecast must reach beyond the horizon (initial schedule looks ahead up to G + tau + L + m0)
+    longest_look_ahead = (max(m.lead_time_max for m in materials) + max(m.rmw_to_pf_lead_time for m in materials)
+                          + fg.lead_time_max + 5)
     demand = _example_demand([fg], horizon + longest_look_ahead)
 
     # Initial state: roughly 2.5 weeks of FG on hand, one release per past week in
@@ -370,7 +378,6 @@ def build_example_input(horizon: int = 36) -> ModelInput:
         demand=demand,
         initial_state=initial,
         production_capacity=450,
-        rmw_to_pf_lead_time=rmw_to_pf_lead_time,
     )
 
 
@@ -403,9 +410,10 @@ def validate_input(model: ModelInput) -> None:
         for age in model.initial_state.rm_stock.get(m.name, {}):
             if not 1 <= age <= m.max_shippable_age:
                 problems.append(f"{m.name}: initial stock age {age} outside 1..{m.max_shippable_age}")
-    tau = model.rmw_to_pf_lead_time
-    if not isinstance(tau, int) or isinstance(tau, bool) or not 0 <= tau < model.horizon:
-        problems.append(f"RMW -> PF lead time must be a whole number of weeks, 0 <= tau < horizon (got {tau!r})")
+        tau = m.rmw_to_pf_lead_time
+        if not isinstance(tau, int) or isinstance(tau, bool) or not 0 <= tau < model.horizon:
+            problems.append(f"{m.name}: RMW -> PF lead time must be a whole number of weeks, "
+                            f"0 <= tau < horizon (got {tau!r})")
     last_needed = model.horizon + 1
     if model.demand.last_week < last_needed:
         problems.append("demand forecast is shorter than the horizon")

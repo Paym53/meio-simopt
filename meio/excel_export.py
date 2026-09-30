@@ -18,8 +18,8 @@ README_ROWS = [
              "sellable age are scrapped at the end of the week if unsold."),
     ("Order of events in a week",
      "1 ageing -> 2 receipts -> 3a DC order (s,S on DC position) -> 3b production release (capped by RM, "
-     "capacity of the production week, batch/MOQ; rest cancelled) -> 3c RM leaves the RMW (reaches "
-     "production tau weeks later) -> 3d RM order (s,S on echelon position) -> 4 demand and allocation -> "
+     "capacity of the production week, batch/MOQ; rest cancelled) -> 3c RM leaves the RMW (material r "
+     "reaches production tau_r weeks later) -> 3d RM order (s,S on echelon position) -> 4 demand and allocation -> "
      "5 fill recording -> 6 waste and holding cost."),
     ("Policy", "Age-aware (s,S): positions minus expected waste (median lead time window), DC order cap, "
                "minimum physical RM stock at the RMW; the week-1 orders are chosen by lookahead."),
@@ -29,9 +29,9 @@ README_ROWS = [
     ("Allocation", "Oldest age first (FIFO). Within an age: channel with the tightest shelf-life requirement "
                    "first, ties: higher target fill rate. Unmet demand is lost."),
     ("Lead times", "Random and order-preserving: an order never arrives before an earlier order on the same "
-                   "lane (arrival = max(order week + lead time, previous arrival)). A release in week t is "
-                   "produced in week t + tau (RMW -> PF lead time, deterministic) and reaches the DC in week "
-                   "t + tau + L."),
+                   "lane (arrival = max(order week + lead time, previous arrival)). RMW -> PF lead time tau_r "
+                   "per material (deterministic); a release in week t is produced when its slowest BOM material "
+                   "has arrived, in week t + tau_p (tau_p = max tau_r), and reaches the DC in week t + tau_p + L."),
     ("Seeds", "Search, hold-out and test seeds are disjoint random futures (demand + lead times)."),
     ("Fill-rate rules", "Search: mean - Z*SE - margin >= F per cell. Hold-out: weak if mean < F, margin += "
                         "max(bump, F - mean). Final verdict (test seeds): mean >= F, no Z, no margin."),

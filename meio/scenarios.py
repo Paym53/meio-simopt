@@ -99,10 +99,10 @@ def build_scenarios(model: ModelInput, n_seeds: int, rng_seed: int, name: str) -
 
     # Open orders of the initial state: they have not arrived by week 1, so their
     # arrival week is at least 2 -> lead time >= 2 - order_week (conditional draw).
-    # FG releases also need the RMW -> PF time tau: arrival = release week + tau + L~.
-    tau = model.rmw_to_pf_lead_time
+    # FG releases also need the RMW -> PF time tau_p: arrival = release week + tau_p + L~.
     dc_pipe = {}
     for p in model.products:
+        tau = model.rmw_to_pf_lead_time(p)
         dc_pipe[p.name] = []
         for order_week, _qty in model.initial_state.dc_pipeline.get(p.name, []):
             lt = sample_lead_time(p.lead_time_dist, n_seeds, rng, at_least=2 - order_week - tau)

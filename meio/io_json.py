@@ -16,8 +16,6 @@ Input format (all weeks are numbered from 1 = current review week):
   "horizon": 36,
   "production_capacity": 450,
   "capacity_overrides": {"18": 0},                           # optional: week -> capacity
-  "rmw_to_pf_lead_time": 1,                                  # optional (default 0): weeks from RMW to
-                                                             # production; FG arrival = release + this + L~
   "products": [ {name, shelf_life, channels: [{name, min_remaining_life, target_fill_rate}],
                  bom: {material: units per FG}, batch_size, moq, holding_cost, waste_cost,
                  fixed_cost_per_release, production_tiers: [{lower, upper, unit_cost}],
@@ -25,7 +23,9 @@ Input format (all weeks are numbered from 1 = current review week):
                  closed_production_weeks: [...]} ],
   "materials": [ {name, shelf_life, min_life_at_shipment, batch_size, moq, unit_cost,
                   fixed_order_cost, holding_cost, waste_cost, transport_cost,
-                  lead_time_dist: {"weeks": probability}, supplier_capacity, closed_order_weeks} ],
+                  lead_time_dist: {"weeks": probability}, supplier_capacity, closed_order_weeks,
+                  rmw_to_pf_lead_time} ],        # optional (default 0): weeks from the RMW to production;
+                                                 # a product is produced when its slowest material arrives
   "demand_forecast": {product: {channel: {"mean": [week 1, week 2, ...], "sd": [...]}}},
   "initial_state": {"dc_stock": {product: {"age": units}}, "rm_stock": {material: {"age": units}},
                     "dc_pipeline": {product: [[release_week, units], ...]},
@@ -72,7 +72,6 @@ def model_to_dict(model: ModelInput) -> dict:
         "horizon": model.horizon,
         "production_capacity": model.production_capacity,
         "capacity_overrides": {str(k): v for k, v in model.capacity_overrides.items()},
-        "rmw_to_pf_lead_time": model.rmw_to_pf_lead_time,
         "products": products,
         "materials": materials,
         "demand_forecast": forecast,
@@ -111,6 +110,7 @@ def model_from_dict(d: dict) -> ModelInput:
             waste_cost=m["waste_cost"], transport_cost=m["transport_cost"],
             lead_time_dist=dist(m["lead_time_dist"]), supplier_capacity=m.get("supplier_capacity"),
             closed_order_weeks=list(m.get("closed_order_weeks", [])),
+            rmw_to_pf_lead_time=m.get("rmw_to_pf_lead_time", 0),      # missing = 0 (same week)
         ))
 
     mean, sd = {}, {}
@@ -129,8 +129,7 @@ def model_from_dict(d: dict) -> ModelInput:
     return ModelInput(horizon=d["horizon"], products=products, materials=materials,
                       demand=DemandForecast(mean=mean, sd=sd), initial_state=state,
                       production_capacity=d["production_capacity"],
-                      capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()},
-                      rmw_to_pf_lead_time=d.get("rmw_to_pf_lead_time", 0))   # missing = 0 (same-week)
+                      capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()})
 
 
 def save_json(data: dict, path: str) -> None:

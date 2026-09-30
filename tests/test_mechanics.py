@@ -416,11 +416,19 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# RMW -> PF lead time (tau)
+# RMW -> PF lead time (tau_r per material; tau_p = slowest material of the BOM)
 # ---------------------------------------------------------------------------
+def _with_tau(model, tau):
+    """Copy of the model with the same RMW -> PF lead time for every material (int), or per
+    material ({name: tau})."""
+    from dataclasses import replace
+    taus = tau if isinstance(tau, dict) else {m.name: tau for m in model.materials}
+    return replace(model, materials=[replace(m, rmw_to_pf_lead_time=taus.get(m.name, 0)) for m in model.materials])
+
+
 def _tau_model(tau, **changes):
     from dataclasses import replace
-    return replace(_tiny_model(stock_b=500), rmw_to_pf_lead_time=tau, **changes)
+    return _with_tau(replace(_tiny_model(stock_b=500), **changes), tau)
 
 
 def test_rmw_to_pf_lead_time_delays_the_fg_arrival_but_rm_leaves_in_the_release_week():
@@ -483,10 +491,10 @@ def test_heuristic_start_levels_grow_with_tau():
     from dataclasses import replace
     settings = SearchSettings(n_quantile_samples=1000)
     model = build_example_input()
-    s0 = initial_schedule(replace(model, rmw_to_pf_lead_time=0), settings)
-    s1 = initial_schedule(replace(model, rmw_to_pf_lead_time=1), settings)
+    s0 = initial_schedule(_with_tau(model, 0), settings)
+    s1 = initial_schedule(_with_tau(model, 1), settings)
     from meio.policy import dc_order_weeks
-    fg0, fg1 = replace(model, rmw_to_pf_lead_time=0), replace(model, rmw_to_pf_lead_time=1)
+    fg0, fg1 = _with_tau(model, 0), _with_tau(model, 1)
     weeks = sorted(set(dc_order_weeks(fg0, fg0.products[0])) & set(dc_order_weeks(fg1, fg1.products[0])))
     assert 17 not in dc_order_weeks(fg1, fg1.products[0])          # closed production week 18 = 17 + tau
     assert (s1.dc_s["FG1"][weeks] > s0.dc_s["FG1"][weeks]).all()
@@ -511,17 +519,20 @@ def test_rmw_to_pf_lead_time_in_json_and_validation():
     from dataclasses import replace
     from meio.config import validate_input
     from meio.io_json import model_from_dict, model_to_dict
-    model = build_example_input()
-    assert model.rmw_to_pf_lead_time == 1
-    d = model_to_dict(model)
-    assert model_from_dict(json.loads(json.dumps(d))).rmw_to_pf_lead_time == 1
-    del d["rmw_to_pf_lead_time"]
-    assert model_from_dict(d).rmw_to_pf_lead_time == 0          # older input files: same-week
+    model = _with_tau(build_example_input(), {"RM_A": 0, "RM_B": 2, "RM_C": 1, "RM_D": 1})
+    d = json.loads(json.dumps(model_to_dict(model)))
+    again = model_from_dict(d)
+    assert [m.rmw_to_pf_lead_time for m in again.materials] == [0, 2, 1, 1]
+    assert again.rmw_to_pf_lead_time(again.products[0]) == 2
+    del d["materials"][1]["rmw_to_pf_lead_time"]
+    assert model_from_dict(d).materials[1].rmw_to_pf_lead_time == 0     # older input files: same week
+    assert all(m.rmw_to_pf_lead_time == 1 for m in build_example_input().materials)
     for bad in (-1, 1.5, "1", True, model.horizon):
+        materials = [replace(model.materials[0], rmw_to_pf_lead_time=bad)] + model.materials[1:]
         try:
-            validate_input(replace(model, rmw_to_pf_lead_time=bad))
+            validate_input(replace(model, materials=materials))
         except ValueError as err:
-            assert "RMW -> PF lead time" in str(err)
+            assert "RM_A: RMW -> PF lead time" in str(err)
             continue
         raise AssertionError(f"tau = {bad!r} was accepted")
 
@@ -544,3 +555,56 @@ def test_rm_expected_waste_uses_demand_tau_plus_lead_time_ahead():
         model.initial_state.rm_stock["A"] = {9: 100}
         r = simulate(model, _tiny_schedule(model, dc_level=0), build_scenarios(model, 2, 1, "t"))   # no release in W1
         assert r.rm["A"]["shipped_T"][0, 1] == 0 and r.rm["A"]["expected_waste"][0, 1] == waste
+
+
+def test_production_waits_for_the_slowest_bom_material():
+    """A needs 0 weeks, B needs 2 weeks from the RMW to production: tau_p = 2. Both leave the
+    RMW in the release week W1; production is in W3; with L = 2 the FG arrives in W5."""
+    model = _tau_model({"A": 0, "B": 2})
+    assert model.rmw_to_pf_lead_time(model.products[0]) == 2 and model.production_week(model.products[0], 1) == 3
+    r = simulate(model, _tiny_schedule(model), build_scenarios(model, 2, 1, "t"))
+    assert r.rm["A"]["shipped_T"][0, 1] == 100 and r.rm["B"]["shipped_T"][0, 1] == 100
+    assert r.dc["F"]["receipts"][0, 5] == 100 and r.dc["F"]["receipts"][0, 1:5].sum() == 0
+
+
+def _two_product_model(capacity_week_2: int):
+    """F1 made from A (tau 1), F2 made from B (tau 0); no demand; capacity 1000 except W2."""
+    from meio.config import DemandForecast
+    def fg(name, material):
+        return Product(name, shelf_life=6, channels=[Channel("Only", 1, 0.9)], bom={material: 1},
+                       batch_size=10, moq=30, holding_cost=0.1, waste_cost=1, fixed_cost_per_release=10,
+                       production_tiers=[Tier(0, 10**9, 1.0)], transport_tiers=[Tier(0, 10**9, 0.1)],
+                       lead_time_dist={2: 1.0})
+    mats = [Material(x, shelf_life=10, min_life_at_shipment=1, batch_size=10, moq=10, unit_cost=1,
+                     fixed_order_cost=1, holding_cost=0.01, waste_cost=1, transport_cost=0.1,
+                     lead_time_dist={3: 1.0}, rmw_to_pf_lead_time=tau) for x, tau in (("A", 1), ("B", 0))]
+    H = 6
+    zeros = np.zeros(H + 1)
+    demand = DemandForecast(mean={("F1", "Only"): zeros, ("F2", "Only"): zeros},
+                            sd={("F1", "Only"): zeros, ("F2", "Only"): zeros})
+    state = InitialState(dc_stock={"F1": {}, "F2": {}}, rm_stock={"A": {1: 500}, "B": {1: 500}},
+                         dc_pipeline={"F1": [], "F2": []}, rm_pipeline={"A": [], "B": []})
+    return ModelInput(horizon=H, products=[fg("F1", "A"), fg("F2", "B")], materials=mats, demand=demand,
+                      initial_state=state, production_capacity=1000, capacity_overrides={2: capacity_week_2})
+
+
+def test_products_with_different_tau_share_the_capacity_of_their_production_week():
+    """Capacity 100 in W2. F1 (tau 1) orders 100 in W1 -> produced in W2 and uses all of it.
+    F2 (tau 0) orders 100 in W2 -> also produced in W2 -> nothing left, cut by capacity.
+    Without F1's order, F2 gets the full 100."""
+    H = 6
+    def schedule(f1_level):
+        f2 = np.zeros(H + 1, int); f2[2] = 100                   # F2 orders only in W2
+        f1 = np.zeros(H + 1, int); f1[1] = f1_level              # F1 orders only in W1
+        zero = np.zeros(H + 1, int)
+        return PolicySchedule(dc_s={"F1": f1, "F2": f2}, dc_S={"F1": f1, "F2": f2},
+                              rm_s={"A": zero, "B": zero}, rm_S={"A": zero, "B": zero},
+                              dc_cap={"F1": 1000, "F2": 1000}, rm_floor={"A": 0, "B": 0})
+    model = _two_product_model(capacity_week_2=100)
+    seeds = build_scenarios(model, 2, 1, "t")
+    shared = simulate(model, schedule(100), seeds)
+    assert shared.dc["F1"]["released_P"][0, 1] == 100
+    assert shared.dc["F2"]["ordered_Q"][0, 2] == 100 and shared.dc["F2"]["released_P"][0, 2] == 0
+    assert shared.dc["F2"]["cut_by_capacity"][0, 2] == 1
+    alone = simulate(model, schedule(0), seeds)
+    assert alone.dc["F2"]["released_P"][0, 2] == 100

@@ -9,8 +9,10 @@ seed. The weekly steps are:
   Step 3a DC ordering             (s,S rule on the effective DC position, order cap)
   Step 3b production release      (capped by usable RM, capacity of the production week,
                                    batch size and MOQ; the rest is cancelled)
-  Step 3c RM transport            (leaves the RMW in the release week, oldest first; reaches
-                                   production tau weeks later, FG at the DC after tau + L~)
+  Step 3c RM transport            (leaves the RMW in the release week, oldest first; material r
+                                   reaches production tau_r weeks later; production starts when
+                                   all BOM materials are there, tau_p = max tau_r; FG at the DC
+                                   after tau_p + L~)
   Step 3d RMW ordering            (s,S rule on the effective echelon position,
                                    minimum physical RM stock)
   Step 4  demand and allocation   (oldest age first; within an age the strictest
@@ -279,6 +281,10 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                      "actual_arrival": int(arr[s]),
                                      "held_up_by_earlier_order": bool(arr[s] > raw_arrival[s])})
 
+    # production capacity used per production week (a release of week t is produced in week
+    # t + tau_p; products with different tau_p can share a production week)
+    capacity_used = np.zeros((n, H + max(model.rmw_to_pf_lead_time(p) for p in products) + 2), dtype=np.int64)
+
     rm_stock, rm_arrivals, rm_last_arrival = {}, {}, {}
     for m in materials:
         rm_stock[m.name] = np.zeros((n, m.max_shippable_age + 1), dtype=np.int64)
@@ -381,8 +387,6 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
 
         # ---------------- Step 3b + 3c: release, cancellation, RM transport ----------------
         usable_rm = {m.name: rm_stock[m.name][:, 1:].sum(axis=1) for m in materials}
-        production_week = model.production_week(t)      # RM reaches production tau weeks later
-        capacity_left = np.full(n, model.capacity_in_week(production_week), dtype=np.int64)
         shipped_total = {m.name: np.zeros(n, dtype=np.int64) for m in materials}
         shipped_by_age = {m.name: np.zeros_like(rm_stock[m.name]) for m in materials}
 
@@ -391,7 +395,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             rm_limit = np.full(n, np.iinfo(np.int64).max)
             for mat_name, per_unit in p.bom.items():
                 rm_limit = np.minimum(rm_limit, usable_rm[mat_name] // per_unit)
-            capacity_before = capacity_left.copy()
+            production_week = model.production_week(p, t)   # all BOM materials at production: t + tau_p
+            capacity_before = model.capacity_in_week(production_week) - capacity_used[:, production_week]
             limit = np.minimum(np.minimum(Q, rm_limit), capacity_before)
             P = round_down_to_supply_rules(limit, p.batch_size, p.moq)
             cancelled = Q - P
@@ -403,7 +408,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             for mat_name, per_unit in p.bom.items():
                 rm_rec[mat_name]["limited_release"][:, t] |= rm_binding & (usable_rm[mat_name] // per_unit == limit)
 
-            capacity_left -= P
+            capacity_used[:, production_week] += P
             for mat_name, per_unit in p.bom.items():   # materials leave the RMW in the release week
                 m = model.material(mat_name)
                 taken = withdraw_fifo(rm_stock[mat_name], per_unit * P, m.max_shippable_age)
@@ -441,7 +446,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                          "held_up_by_earlier_order": bool(P[s] > 0 and arrival[s] > production_week + lead)})
                 for mat_name, per_unit in p.bom.items():
                     flow(s, t, "RMW", "PF", mat_name, per_unit * P[s],
-                         f"shipped for release of {p.name}; reaches production in week {production_week}")
+                         f"shipped for release of {p.name}; reaches production in week "
+                         f"{t + model.material(mat_name).rmw_to_pf_lead_time}, produced in week {production_week}")
                     flow(s, t, "PF", "consumed", mat_name, per_unit * P[s],
                          f"transformed into {p.name} in week {production_week}")
                 flow(s, t, "PF", "In transit (PF -> DC)", p.name, P[s],

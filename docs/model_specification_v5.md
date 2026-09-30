@@ -4,15 +4,17 @@
 > chooses the committed orders by simulation. See `docs/policy_choice.md` and the README. Sections 5,
 > 8 (steps 3a and 3d) and 12 are therefore superseded where they describe the plain (s,S) rule.
 >
-> **Update (30 Sep 2026): RMW -> PF lead time.** The input has a deterministic lead time
-> $\tau$ (`rmw_to_pf_lead_time`, weeks, default 0) for raw material from the RMW to production. RM
-> leaves the RMW in the release week $t$ (FIFO, shelf-life gate at shipment, transport cost there);
-> production takes place in week $t+\tau$, whose capacity and closed production weeks apply; the FG
-> arrives at the DC in week $t+\tau+\tilde L_f$. $\tilde L_f$ now covers production start -> usable
-> at the DC (Section 3 below still includes the RMW -> PF transport in it). Every quantity that used
-> $\tilde L_f$ uses $\tau+\tilde L_f$: order-week horizon rules (C19), L_max and the evaluation window,
-> expected-waste windows, the heuristic start levels and the search's repair weeks. With $\tau=0$ the
-> model is exactly the original one.
+> **Update (30 Sep 2026): RMW -> PF lead time per material.** Every raw material has a deterministic
+> lead time $\tau_r$ (`materials[].rmw_to_pf_lead_time`, weeks, default 0) from the RMW to production.
+> All BOM materials leave the RMW in the release week $t$ (FIFO, shelf-life gate at shipment, transport
+> cost there); production of FG $f$ starts when the slowest has arrived, in week $t+\tau_f$ with
+> $\tau_f=\max_{r\in BOM_f}\tau_r$ (faster materials wait at production, no holding cost). The
+> capacity of that production week (shared by all products produced then) and its closed status apply;
+> the FG arrives at the DC in week $t+\tau_f+\tilde L_f$. $\tilde L_f$ now covers production start ->
+> usable at the DC (Section 3 below still includes the RMW -> PF transport in it). Every quantity that
+> used $\tilde L_f$ uses $\tau_f+\tilde L_f$: order-week horizon rules (C19), L_max and the evaluation
+> window, expected-waste windows, the heuristic start levels and the search's repair weeks. With all
+> $\tau_r=0$ the model is exactly the original one.
 
 # MEIO Simulation-Optimisation Model — Prototype Specification (v5)
 
