@@ -488,7 +488,6 @@ def test_open_releases_of_the_initial_state_also_need_tau():
 
 
 def test_heuristic_start_levels_grow_with_tau():
-    from dataclasses import replace
     settings = SearchSettings(n_quantile_samples=1000)
     model = build_example_input()
     s0 = initial_schedule(_with_tau(model, 0), settings)
