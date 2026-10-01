@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 python main.py --preset quick      # ~1-2 min, example input
 python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 80 tests
+python -m pytest -q                # 85 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:

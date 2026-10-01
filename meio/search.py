@@ -84,7 +84,7 @@ class Searcher:
     def evaluate(self, schedule: PolicySchedule) -> Evaluation:
         """Simulate the search seeds and apply the search rule (unfixable cells excluded)."""
         self.n_evaluations += 1
-        result = simulate(self.model, schedule, self.search_seeds)
+        result = simulate(self.model, schedule, self.search_seeds, report_details=False)
         cells = service.apply_search_rule(service.cell_table(self.model, result),
                                           self.settings.z, self.margins)
         keys = list(zip(cells["product"], cells["channel"], cells["week"]))
@@ -326,7 +326,7 @@ class Searcher:
             ev = self.improve(ev, round_no)
             schedule = ev.schedule
 
-            hold_result = simulate(self.model, schedule, self.holdout_seeds)
+            hold_result = simulate(self.model, schedule, self.holdout_seeds, report_details=False)
             hold_cells = service.cell_table(self.model, hold_result)
             weak = service.holdout_check(hold_cells, self.margins, st.min_margin_bump)
             weak.insert(0, "round", round_no)

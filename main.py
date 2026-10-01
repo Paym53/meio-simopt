@@ -47,7 +47,7 @@ def evaluate_baseline(model: ModelInput, schedule: PolicySchedule, test_seeds: S
     RMW minimum), simulated on the same test seeds as the optimised schedule, with the rule's
     own week-1 orders (no lookahead). Same policy rule, heuristic parameters: this shows what
     the optimisation adds. Returns plain data for summary.json."""
-    result = simulate(model, schedule, test_seeds)
+    result = simulate(model, schedule, test_seeds, report_details=False)   # baseline: no report-only values
     cells = service.final_verdict(service.cell_table(model, result)).rename(columns={"mean_fill": "test_mean_fill"})
     return {
         "description": "Heuristic start schedule of the search (demand quantiles over the lead time incl. "

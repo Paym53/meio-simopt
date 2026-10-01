@@ -5,8 +5,8 @@ services:
   - type: web
     name: meio-simopt-api
     runtime: python
-    # free: 512 MB, 0.1 CPU, sleeps after 15 idle minutes -> a "quick" run takes ~15+ min.
-    # starter (paid): 512 MB, 0.5 CPU, always on -> a "quick" run takes ~3-4 min.
+    # free: 512 MB, 0.1 CPU, sleeps after 15 idle minutes -> a "quick" run takes ~7-8 min.
+    # starter (paid): 512 MB, 0.5 CPU, always on -> a "quick" run takes ~2-3 min.
     plan: free
     # Cannot be changed after creation. Pick the region closest to your Supabase project.
     region: frankfurt
