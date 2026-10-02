@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 python main.py --preset quick      # ~1-2 min, example input
 python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 85 tests
+python -m pytest -q                # 89 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:
@@ -45,7 +45,7 @@ Each run creates a folder `output/run_<timestamp>/` containing:
 
 Other scripts:
 - `python rolling_demo.py`: 3 consecutive weekly reviews with state updates.
-- `python -m meio.io_json examples/example_input.json`: writes the example input.
+- `python -m meio.io_json <file>`: writes the small built-in reference instance (used by the tests and by `main.py` without `--input`).
 
 ## Web API
 
@@ -121,7 +121,7 @@ meio/
 tests/test_mechanics.py    unit tests (conservation, FIFO, arrivals, rules, JSON)
 tests/test_api.py          web API tests (input checks, run lifecycle, API key)
 tests/test_deployment.py   render.yaml consistent with api.py and CI
-examples/                  example_input.json (input format) and example_summary.json (output of a quick run)
+examples/                  example_input.json (the app's default dataset: FG1, ~4,000 units/week) and example_summary.json (its quick run)
 docs/                      specification, policy choice, app integration plan
 ```
 

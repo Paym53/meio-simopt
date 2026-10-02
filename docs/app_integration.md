@@ -22,7 +22,7 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 
 **Input.** A JSON document as in `examples/example_input.json`, described at the top of `meio/io_json.py`.
 - `horizon`, `production_capacity`, `capacity_overrides`
-- `products`: shelf life, channels (target fill rate, minimum remaining life), BOM, batch size / MOQ, costs, discount tiers, lead-time distribution, closed weeks
+- `products`: shelf life, channels (target fill rate, minimum remaining life), BOM (units of each material per FG unit, whole or fractional such as 0.2; the RM shipped is rounded up to whole units), batch size / MOQ, costs, discount tiers, lead-time distribution, closed weeks
 - `materials`: shelf life, batch size / MOQ, costs, lead-time distribution, supplier capacity, closed weeks, `rmw_to_pf_lead_time` (weeks from the RMW to production, whole number ≥ 0, optional, default 0). A product is produced when its slowest BOM material has arrived (τ_p = max over the BOM) and reaches the DC after τ_p plus the PF → DC lead time; capacity and closed production weeks refer to that production week
 - `demand_forecast[product][channel] = {mean: [...], sd: [...]}`, one value per week starting at week 1
 - `initial_state`: stock by age at the DC and RMW, open orders with their order week (≤ 0)

@@ -11,7 +11,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .config import ModelInput, SearchSettings
+from .config import ModelInput, SearchSettings, rm_units_for
 from .policy import PolicySchedule, dc_order_weeks, rm_order_weeks
 from .simulation import CHANNEL_SERIES, DC_SERIES, RM_SERIES, SimResult
 
@@ -350,7 +350,7 @@ def conservation_checks(model: ModelInput, result: SimResult) -> pd.DataFrame:
         err = initial + rm["receipts"][:, 1:].sum(1) - rm["shipped_T"][:, 1:].sum(1) - rm["waste"][:, 1:].sum(1) - rm["on_hand_end"][:, -1]
         rows.append({"check": f"RMW {m.name}: initial + receipts - shipped - waste - final stock = 0",
                      "max abs error over all seeds": int(np.abs(err).max()), "ok": bool(np.abs(err).max() == 0)})
-        needed = sum(p.bom[m.name] * result.dc[p.name]["released_P"] for p in model.products_using(m.name))
+        needed = sum(rm_units_for(p.bom[m.name], result.dc[p.name]["released_P"]) for p in model.products_using(m.name))
         err = rm["shipped_T"] - needed
         rows.append({"check": f"{m.name}: shipped to PF = BOM x released production",
                      "max abs error over all seeds": int(np.abs(err).max()), "ok": bool(np.abs(err).max() == 0)})
