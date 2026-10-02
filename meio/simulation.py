@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .config import ModelInput, Product, Tier
+from .config import ModelInput, Product, Tier, max_fg_from, rm_units_for
 from .policy import PolicySchedule, dc_order_weeks, rm_order_weeks
 from .scenarios import ScenarioSet
 
@@ -478,7 +478,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             Q = ordered_Q[p.name]
             rm_limit = np.full(n, np.iinfo(np.int64).max)
             for mat_name, per_unit in p.bom.items():
-                rm_limit = np.minimum(rm_limit, usable_rm[mat_name] // per_unit)
+                rm_limit = np.minimum(rm_limit, max_fg_from(per_unit, usable_rm[mat_name]))
             production_week = t + tau[p.name]               # all BOM materials at production: t + tau_p
             capacity_before = model.capacity_in_week(production_week) - capacity_used[:, production_week]
             limit = np.minimum(np.minimum(Q, rm_limit), capacity_before)
@@ -490,16 +490,17 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             rm_binding = cut & (rm_limit == limit) & (rm_limit < Q)
             capacity_binding = cut & (capacity_before == limit) & (capacity_before < Q)
             for mat_name, per_unit in p.bom.items():
-                rm_rec[mat_name]["limited_release"][:, t] |= rm_binding & (usable_rm[mat_name] // per_unit == limit)
+                rm_rec[mat_name]["limited_release"][:, t] |= rm_binding & (max_fg_from(per_unit, usable_rm[mat_name]) == limit)
 
             capacity_used[:, production_week] += P
             for mat_name, per_unit in p.bom.items():   # materials leave the RMW in the release week
                 m = material_by_name[mat_name]
-                taken = withdraw_fifo(rm_stock[mat_name], per_unit * P, m.max_shippable_age)
+                shipped = rm_units_for(per_unit, P)    # per_unit x P, rounded up to whole units
+                taken = withdraw_fifo(rm_stock[mat_name], shipped, m.max_shippable_age)
                 if trace_seeds:
                     shipped_by_age[mat_name] += taken
-                shipped_total[mat_name] += per_unit * P
-                usable_rm[mat_name] -= per_unit * P
+                shipped_total[mat_name] += shipped
+                usable_rm[mat_name] -= shipped
 
             arrival = schedule_arrivals(dc_arrivals[p.name], dc_last_arrival[p.name], production_week, P,
                                         scen.dc_lead_time[p.name][:, t])
@@ -531,10 +532,10 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                                          "actual_arrival": int(arrival[s]) if P[s] > 0 else None,
                                          "held_up_by_earlier_order": bool(P[s] > 0 and arrival[s] > production_week + lead)})
                 for mat_name, per_unit in p.bom.items():
-                    flow(s, t, "RMW", "PF", mat_name, per_unit * P[s],
+                    flow(s, t, "RMW", "PF", mat_name, rm_units_for(per_unit, P[s]),
                          f"shipped for release of {p.name}; reaches production in week "
                          f"{t + material_by_name[mat_name].rmw_to_pf_lead_time}, produced in week {production_week}")
-                    flow(s, t, "PF", "consumed", mat_name, per_unit * P[s],
+                    flow(s, t, "PF", "consumed", mat_name, rm_units_for(per_unit, P[s]),
                          f"transformed into {p.name} in week {production_week}")
                 flow(s, t, "PF", "In transit (PF -> DC)", p.name, P[s],
                      f"produced in week {production_week}; arrives in week {int(arrival[s])}" if P[s] > 0 else "")

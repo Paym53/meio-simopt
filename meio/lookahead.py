@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from . import service
-from .config import ModelInput, SearchSettings
+from .config import ModelInput, SearchSettings, max_fg_from
 from .policy import PolicySchedule
 from .scenarios import ScenarioSet
 from .simulation import simulate
@@ -82,7 +82,7 @@ def lookahead_week1(model: ModelInput, schedule: PolicySchedule,
     usable = {m.name: sum(model.initial_state.rm_stock.get(m.name, {}).values()) for m in model.materials}
     for p in model.products:
         production_week = model.production_week(p, 1)
-        feasible = min([usable[r] // a for r, a in p.bom.items()] + [model.capacity_in_week(production_week)])
+        feasible = min([max_fg_from(a, usable[r]) for r, a in p.bom.items()] + [model.capacity_in_week(production_week)])
         feasible = (feasible // p.batch_size) * p.batch_size
         candidates = {0, rule_orders["dc"][p.name]}
         if feasible >= p.moq and production_week not in p.closed_production_weeks:

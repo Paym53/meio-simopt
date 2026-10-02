@@ -9,7 +9,8 @@ JSON interface of the model.
           service.cells, baseline (heuristic start schedule on the same seeds) and
           settings. Version-1 keys are unchanged (docs/app_integration.md).
 
-Run   python -m meio.io_json examples/example_input.json   to (re)create the example input.
+examples/example_input.json is the app's default dataset (FG1, about 4,000 units per week, maintained
+by hand). Run   python -m meio.io_json <file>   to write the small built-in reference instance.
 
 Input format (all weeks are numbered from 1 = current review week):
 {
@@ -17,7 +18,7 @@ Input format (all weeks are numbered from 1 = current review week):
   "production_capacity": 450,
   "capacity_overrides": {"18": 0},                           # optional: week -> capacity
   "products": [ {name, shelf_life, channels: [{name, min_remaining_life, target_fill_rate}],
-                 bom: {material: units per FG}, batch_size, moq, holding_cost, waste_cost,
+                 bom: {material: units per FG, whole or fractional e.g. 0.2}, batch_size, moq, holding_cost, waste_cost,
                  fixed_cost_per_release, production_tiers: [{lower, upper, unit_cost}],
                  transport_tiers: [...], lead_time_dist: {"weeks": probability},
                  closed_production_weeks: [...]} ],
@@ -84,6 +85,12 @@ def model_to_dict(model: ModelInput) -> dict:
     }
 
 
+def _bom_quantity(value) -> int | float:
+    """BOM quantity from JSON: whole numbers stay int (1.0 -> 1), fractions stay float (0.2)."""
+    value = float(value)
+    return int(value) if value.is_integer() else value
+
+
 def model_from_dict(d: dict) -> ModelInput:
     def dist(x):
         return {int(k): float(v) for k, v in x.items()}
@@ -93,7 +100,7 @@ def model_from_dict(d: dict) -> ModelInput:
         products.append(Product(
             name=p["name"], shelf_life=p["shelf_life"],
             channels=[Channel(**c) for c in p["channels"]],
-            bom={k: int(v) for k, v in p["bom"].items()},
+            bom={k: _bom_quantity(v) for k, v in p["bom"].items()},
             batch_size=p["batch_size"], moq=p["moq"], holding_cost=p["holding_cost"],
             waste_cost=p["waste_cost"], fixed_cost_per_release=p["fixed_cost_per_release"],
             production_tiers=[Tier(**t) for t in p["production_tiers"]],
@@ -259,6 +266,9 @@ def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, ce
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "examples/example_input.json"
-    save_json(model_to_dict(build_example_input()), target)
-    print(f"example input written to {target}")
+    # Writes the small built-in reference instance (the one the unit tests use). The app's default
+    # dataset examples/example_input.json is maintained separately, so this never overwrites it.
+    if len(sys.argv) < 2:
+        sys.exit("usage: python -m meio.io_json <target.json>   (writes the built-in reference instance)")
+    save_json(model_to_dict(build_example_input()), sys.argv[1])
+    print(f"built-in reference instance written to {sys.argv[1]}")

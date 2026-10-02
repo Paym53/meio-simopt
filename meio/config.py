@@ -17,14 +17,42 @@ Conventions used in the whole project
   AFTER this week's receipts have been put on stock. Orders that are
   still open ("pipeline") therefore arrive in week 2 or later.
 
-The function build_example_input() at the bottom creates the example
-instance (1 finished good, 4 raw materials, 3 channels).
+The function build_example_input() at the bottom creates the small built-in
+reference instance (1 finished good, 4 raw materials, 3 channels) that the unit
+tests and `python main.py` without --input use. The app's default dataset is
+examples/example_input.json (a separate, larger instance).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Bill of materials: whole or fractional raw-material units per FG unit
+# ---------------------------------------------------------------------------
+MAX_BOM_DENOMINATOR = 10_000      # a BOM quantity must be a fraction with at most this denominator
+
+
+def bom_fraction(quantity: float) -> Fraction:
+    """The BOM quantity as an exact fraction (0.2 -> 1/5, 3 -> 3/1). Whole and fractional
+    quantities use the same integer arithmetic below, so no float rounding can creep in."""
+    return Fraction(quantity).limit_denominator(MAX_BOM_DENOMINATOR)
+
+
+def rm_units_for(quantity: float, fg_units):
+    """Raw-material units shipped for a release of fg_units: quantity x fg_units, rounded UP to
+    whole units (stock is counted in whole units). Works on numbers and integer arrays."""
+    f = bom_fraction(quantity)
+    return -(-(f.numerator * fg_units) // f.denominator)
+
+
+def max_fg_from(quantity: float, rm_units):
+    """Largest number of FG units whose raw-material need (rm_units_for) fits into rm_units."""
+    f = bom_fraction(quantity)
+    return (rm_units * f.denominator) // f.numerator
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +80,7 @@ class Product:
     name: str
     shelf_life: int                    # A_f [weeks], starts on arrival at the DC
     channels: list[Channel]
-    bom: dict[str, int]                # material name -> units needed per FG unit
+    bom: dict[str, float]              # material name -> units per FG unit (whole or fractional, e.g. 0.2)
     batch_size: int                    # releases are multiples of this
     moq: int                           # minimum release quantity (multiple of batch_size)
     holding_cost: float                # per unit per week (end-of-week stock)
@@ -392,9 +420,12 @@ def validate_input(model: ModelInput) -> None:
         for c in p.channels:
             if p.max_age_for_channel(c) < 1:
                 problems.append(f"{p.name}/{c.name}: required remaining life >= shelf life")
-        for m in p.bom:
+        for m, quantity in p.bom.items():
             if m not in [x.name for x in model.materials]:
                 problems.append(f"{p.name}: BOM material {m} is not defined")
+            if not quantity > 0 or abs(float(bom_fraction(quantity)) - quantity) > 1e-9:
+                problems.append(f"{p.name}: BOM quantity of {m} must be > 0 and a simple fraction "
+                                f"(e.g. 0.2, 0.25, 1, 3; got {quantity!r})")
         for tiers, label in ((p.production_tiers, "production"), (p.transport_tiers, "transport")):
             for a, b in zip(tiers, tiers[1:]):
                 if b.lower != a.upper + 1:

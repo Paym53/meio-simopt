@@ -16,6 +16,11 @@
 > window, expected-waste windows, the heuristic start levels and the search's repair weeks. With all
 > $\tau_r=0$ the model is exactly the original one.
 
+> **Update (2 Oct 2026): fractional BOM quantities.** $a_{f,r}$ may be fractional (e.g. 0.2). A release of
+> $P$ units ships $\lceil a_{f,r}P\rceil$ units of material $r$ (whole units, exact integer arithmetic), and
+> the RM limit of a release is the largest $P$ with $\lceil a_{f,r}P\rceil\le$ usable stock. Whole-number
+> BOMs are unchanged.
+
 # MEIO Simulation-Optimisation Model — Prototype Specification (v5)
 
 *Perishable two-echelon supply chain with production, stochastic lead times, non-stationary demand, and time-specific (s,S) policies*

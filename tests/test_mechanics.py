@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from meio import service
 from meio.config import (Channel, InitialState, Material, ModelInput, Product, SearchSettings, Tier,
-                         build_example_input, median_of)
+                         build_example_input, max_fg_from, median_of, rm_units_for)
 from meio.policy import PolicySchedule, initial_schedule
 from meio.scenarios import build_scenarios
 from meio.simulation import (allocate_demand, projected_fg_waste, projected_rm_waste,
@@ -128,7 +128,7 @@ def test_conservation_of_units():
         init = sum(model.initial_state.rm_stock[m.name].values())
         bal = init + rm["receipts"][:, 1:].sum(1) - rm["shipped_T"][:, 1:].sum(1) - rm["waste"][:, 1:].sum(1) - rm["on_hand_end"][:, -1]
         assert np.abs(bal).max() == 0
-        assert (rm["shipped_T"] == dc["released_P"] * model.products[0].bom[m.name]).all()
+        assert (rm["shipped_T"] == rm_units_for(model.products[0].bom[m.name], dc["released_P"])).all()
 
 
 def test_echelon_position_is_not_changed_by_internal_moves():
@@ -717,3 +717,78 @@ def test_projected_fg_waste_equals_the_projection_through_allocate_demand():
                   for _ in range(int(rng.integers(1, 9)))]
         assert np.array_equal(projected_fg_waste(stock, weekly, max_age, priority),
                               reference(stock, weekly, max_age, priority))
+
+
+# ---------------------------------------------------------------------------
+# Fractional BOM quantities (e.g. 0.2 units of a material per FG unit)
+# ---------------------------------------------------------------------------
+def test_bom_quantities_whole_and_fractional_use_exact_integer_arithmetic():
+    P = np.array([0, 1, 4, 5, 7, 5000, 12345])
+    assert list(rm_units_for(1, P)) == list(P)                       # whole numbers: unchanged
+    assert list(rm_units_for(3, P)) == list(3 * P)
+    assert list(rm_units_for(0.2, P)) == [0, 1, 1, 1, 2, 1000, 2469]  # 0.2 x P rounded UP
+    assert list(rm_units_for(1.5, P)) == [0, 2, 6, 8, 11, 7500, 18518]
+    usable = np.array([0, 1, 3, 1000, 999, 7])
+    assert list(max_fg_from(1, usable)) == list(usable)
+    assert list(max_fg_from(3, usable)) == list(usable // 3)
+    assert list(max_fg_from(0.2, usable)) == [0, 5, 15, 5000, 4995, 35]
+    # max_fg_from is exactly the largest release whose RM need fits into the stock
+    for q in (0.2, 0.25, 0.3, 1 / 3, 1, 1.5, 2, 7):
+        for u in range(0, 200):
+            k = max_fg_from(q, u)
+            assert rm_units_for(q, k) <= u < rm_units_for(q, k + 1)
+
+
+def _fractional_bom_model():
+    from dataclasses import replace
+    model = build_example_input()
+    fg = replace(model.products[0], bom={"RM_A": 0.2, "RM_B": 1, "RM_C": 1, "RM_D": 1})
+    return replace(model, products=[fg])
+
+
+def test_fractional_bom_ships_the_rounded_up_share_and_conserves_units():
+    from meio.tables import conservation_checks
+    model = _fractional_bom_model()
+    schedule = initial_schedule(model, SearchSettings(n_quantile_samples=500))
+    r = simulate(model, schedule, build_scenarios(model, 100, 5, "t"))
+    released = r.dc["FG1"]["released_P"]
+    assert released.sum() > 0
+    assert (r.rm["RM_A"]["shipped_T"] == -(-released // 5)).all()    # ceil(0.2 x P)
+    assert (r.rm["RM_B"]["shipped_T"] == released).all()
+    assert conservation_checks(model, r)["ok"].all()
+
+
+def test_fractional_bom_limits_the_release_by_the_fractional_need():
+    from dataclasses import replace
+    model = _tiny_model(stock_b=500)
+    model = replace(model, products=[replace(model.products[0], bom={"A": 0.25, "B": 1})],
+                    initial_state=replace(model.initial_state, rm_stock={"A": {1: 14}, "B": {1: 500}}))
+    H = model.horizon
+    sched = PolicySchedule(dc_s={"F": np.full(H + 1, 100)}, dc_S={"F": np.full(H + 1, 100)},
+                           rm_s={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
+                           rm_S={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
+                           dc_cap={"F": 1000}, rm_floor={"A": 0, "B": 0})
+    r = simulate(model, sched, build_scenarios(model, 3, 1, "t"))
+    # 14 units of A make at most 56 FG (0.25 each) -> release 50 (batch 10), uses ceil(12.5) = 13 A
+    assert r.dc["F"]["released_P"][0, 1] == 50 and r.dc["F"]["cut_by_rm"][0, 1] == 1
+    assert r.rm["A"]["shipped_T"][0, 1] == 13 and r.rm["A"]["limited_release"][0, 1] == 1
+
+
+def test_fractional_bom_in_json_and_validation():
+    import json
+    from dataclasses import replace
+    from meio.config import validate_input
+    from meio.io_json import model_from_dict, model_to_dict
+    model = _fractional_bom_model()
+    again = model_from_dict(json.loads(json.dumps(model_to_dict(model))))
+    assert again.products[0].bom == {"RM_A": 0.2, "RM_B": 1, "RM_C": 1, "RM_D": 1}
+    assert isinstance(again.products[0].bom["RM_B"], int)              # 1 stays a whole number
+    validate_input(again)
+    for bad in (0, -1, 0.00001):
+        fg = replace(model.products[0], bom={**model.products[0].bom, "RM_A": bad})
+        try:
+            validate_input(replace(model, products=[fg]))
+        except ValueError as exc:
+            assert "BOM quantity of RM_A" in str(exc)
+        else:
+            raise AssertionError(f"BOM quantity {bad} was accepted")
