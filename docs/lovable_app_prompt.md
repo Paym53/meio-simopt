@@ -296,7 +296,7 @@ where is the risk?
   adjust the plan, every change is logged"; right side: Product selector, Channel selector
   ("All channels"), green "Save plan" button.
 - **Planning assistant box** at the top (as in the screenshot): multi-line input with examples
-  ("increase FG1 Retail in W10-W14 by 15 %", "set FG1 Online W20 to 150", "reduce all Outlet
+  ("increase FG1 Retail in W10-W14 by 15 %", "set FG1 Online W20 to 150", "reduce all AMZ
   demand in W30-W36 by 10 %"), buttons "Apply" (blue) and "Reset to input forecast".
 - **Manual override grid** (as in the screenshot): rows = product x channel with a channel pill,
   plus a highlighted TOTAL row per product; columns = weeks (toggle: 4-week buckets), a total
