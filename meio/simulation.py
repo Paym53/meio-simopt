@@ -6,7 +6,8 @@ seed. The weekly steps are:
 
   Step 1  ageing                  (all stock one week older)
   Step 2  receipts                (supplier -> RMW, production -> DC, enter at age 1)
-  Step 3a DC ordering             (s,S rule on the effective DC position, order cap)
+  Step 3a DC ordering             (s,S rule on the effective DC position, order cap, rounded up
+                                   to a price break when that costs no more in total)
   Step 3b production release      (capped by usable RM, capacity of the production week,
                                    batch size and MOQ; the rest is cancelled)
   Step 3c RM transport            (leaves the RMW in the release week, oldest first; material r
@@ -108,6 +109,39 @@ def tier_unit_cost(qty: np.ndarray, tiers: list[Tier]) -> np.ndarray:
     for tier in tiers[1:]:
         rate = np.where(qty >= tier.lower, tier.unit_cost, rate)
     return rate
+
+
+def price_break_quantities(product: Product) -> list[int]:
+    """Quantities at which a cheaper production or transport band starts, rounded up to the
+    batch size (all-units discounts)."""
+    lowers = {t.lower for t in product.production_tiers[1:] + product.transport_tiers[1:] if t.lower > 0}
+    return sorted({int(np.ceil(b / product.batch_size)) * product.batch_size for b in lowers})
+
+
+def variable_release_cost(qty: np.ndarray, product: Product) -> np.ndarray:
+    """Production plus PF -> DC transport cost of a release of qty units (all-units tiers)."""
+    return qty * (tier_unit_cost(qty, product.production_tiers) + tier_unit_cost(qty, product.transport_tiers))
+
+
+def round_up_to_price_break(qty: np.ndarray, product: Product, cap: int) -> np.ndarray:
+    """Order a price-break quantity instead of qty when that costs no more in total.
+
+    With all-units discounts a slightly larger order can be cheaper in total (e.g. 9,900 units
+    at 1.90 = 18,810 vs 10,100 units at 1.30 = 13,130). Among qty and every break quantity
+    above it that is not above the order cap, the cheapest total production + transport
+    cost wins; ties go to the smaller quantity. Orders of 0 stay 0. Without tiers nothing
+    changes."""
+    qty = np.asarray(qty)
+    breaks = [b for b in price_break_quantities(product) if b <= cap]
+    if not breaks:
+        return qty
+    best_qty, best_cost = qty.copy(), variable_release_cost(qty, product)
+    for b in breaks:
+        b_cost = variable_release_cost(np.full(qty.shape, b), product)
+        better = (qty > 0) & (b > qty) & (b_cost < best_cost - 1e-9)
+        best_qty = np.where(better, b, best_qty)
+        best_cost = np.where(better, b_cost, best_cost)
+    return best_qty.astype(qty.dtype)
 
 
 def _differences(cumulative: np.ndarray) -> np.ndarray:
@@ -454,6 +488,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
                 cap = max(p.moq, (schedule.dc_cap[p.name] // p.batch_size) * p.batch_size)
                 capped = Q > cap
                 Q = np.minimum(Q, cap)
+                # all-units discounts: a price-break quantity (<= cap) that costs no more in total
+                Q = round_up_to_price_break(Q, p, cap)
             else:
                 Q = np.zeros(n, dtype=np.int64)
             if t == 1 and p.name in week1_orders["dc"]:    # lookahead candidate for week 1

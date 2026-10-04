@@ -292,10 +292,12 @@ class SearchSettings:
 
 
 PRESETS = {
-    # name: (search seeds, hold-out seeds, test seeds, improve passes, outer rounds)  ~runtime, 2 CPU cores
-    "quick": (200, 400, 2000, 2, 2),        # ~1-2 min, for trying things out
-    "standard": (300, 600, 5000, 3, 2),     # ~3 min, default
-    "full": (500, 1000, 10000, 4, 3),       # ~5-6 min, for decisions you rely on
+    # name: (search seeds, hold-out seeds, test seeds, improve passes, outer rounds)
+    # The hold-out set is simulated only once per round, so it is large: fill rates per seed
+    # are skewed (mostly 100 %, rare deep shortages) and small samples overestimate them.
+    "quick": (200, 1000, 2000, 2, 2),       # for trying things out
+    "standard": (300, 1500, 5000, 3, 2),    # default
+    "full": (500, 2500, 10000, 4, 3),       # for decisions you rely on
 }
 
 

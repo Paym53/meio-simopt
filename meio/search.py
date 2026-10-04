@@ -76,6 +76,7 @@ class Searcher:
         self.verbose = verbose
         self.margins: dict = {}
         self.unfixable: set = set()
+        self.unfixable_floor: dict = {}     # unfixable cell -> search lower bound it must keep
         self.log: list[dict] = []
         self.n_evaluations = 0
         self.rng = np.random.default_rng(settings.base_seed + 7)
@@ -92,15 +93,37 @@ class Searcher:
                          "feasible": ev.feasible, "failing_cells": ev.n_failing})
 
     def evaluate(self, schedule: PolicySchedule) -> Evaluation:
-        """Simulate the search seeds and apply the search rule (unfixable cells excluded)."""
+        """Simulate the search seeds and apply the search rule. Cells declared unfixable do
+        not count, except during an improve phase: there they must keep at least the service
+        (search lower bound) they had when the phase started (self.unfixable_floor), so cost
+        is never bought with less service on cells the search could not fix."""
         self.n_evaluations += 1
         result = simulate(self.model, schedule, self.search_seeds, report_details=False)
         cells = service.apply_search_rule(service.cell_table(self.model, result),
                                           self.settings.z, self.margins)
         keys = list(zip(cells["product"], cells["channel"], cells["week"]))
-        counted = np.array([k not in self.unfixable for k in keys])
-        failing = int((~cells["search_feasible"].to_numpy() & counted).sum())
+        bound = cells["search_lower_bound"].to_numpy()
+        unfixable = np.array([k in self.unfixable for k in keys])
+        kept = np.array([np.isnan(b) or b >= self.unfixable_floor.get(k, -np.inf) - 1e-9
+                         for k, b in zip(keys, bound)])
+        failing = int((~cells["search_feasible"].to_numpy() & ~unfixable).sum() + (unfixable & ~kept).sum())
         return Evaluation(schedule, result, cells, result.mean_total_cost(), failing == 0, failing)
+
+    def service_floors(self, ev: Evaluation) -> dict:
+        """Search lower bound of every unfixable cell in `ev` (cells without demand: no floor)."""
+        floors = {}
+        for k, b in zip(zip(ev.cells["product"], ev.cells["channel"], ev.cells["week"]),
+                        ev.cells["search_lower_bound"]):
+            if k in self.unfixable and not np.isnan(b):
+                floors[k] = float(b)
+        return floors
+
+    def unfixable_shortfall(self, ev: Evaluation) -> float:
+        """Total gap to target of the unfixable cells in `ev` (compares starts on service)."""
+        cells = ev.cells
+        gap = (cells["target_F"] - cells["search_lower_bound"]).clip(lower=0).fillna(0)
+        keys = list(zip(cells["product"], cells["channel"], cells["week"]))
+        return float(sum(g for k, g in zip(keys, gap) if k in self.unfixable))
 
     # ------------------------------------------------------------------
     # Step sizes and moves
@@ -305,15 +328,19 @@ class Searcher:
             S[r] += step
         return True, f"{text} of {p.name}: weeks {target_weeks[0]}-{target_weeks[-1]}"
 
-    def repair(self, schedule: PolicySchedule, round_no: int) -> Evaluation:
+    def repair(self, schedule: PolicySchedule, round_no: int, give_up_above: float = np.inf) -> Evaluation:
         """Raise levels until every cell passes the search rule. A cell that shows no
         progress for `repair_patience` steps is declared unfixable; the level increases
-        made for it since its last progress are undone, so they do not inflate the schedule."""
+        made for it since its last progress are undone, so they do not inflate the schedule.
+        give_up_above: stop as soon as more cells than this are unfixable (multi-start: such
+        a start can no longer beat the best one)."""
         st = self.settings
         ev = self.evaluate(schedule)
         progress: dict = {}             # cell -> (best lower bound, steps without progress)
         checkpoint: dict = {}           # cell -> schedule at its last progress
         for _ in range(st.max_repair_steps):
+            if len(self.unfixable) > give_up_above:
+                break
             cells = ev.cells
             keys = list(zip(cells["product"], cells["channel"], cells["week"]))
             open_mask = ~cells["search_feasible"].to_numpy() & np.array([k not in self.unfixable for k in keys])
@@ -371,6 +398,7 @@ class Searcher:
         }
         n_levels = max(len(self.block_sizes(len(weeks))) for _, _, weeks in items)
         fraction = st.step_fraction
+        self.unfixable_floor = self.service_floors(current)     # unfixable cells: never worse
 
         for pass_no in range(1, st.max_improve_passes + 1):
             accepted = 0
@@ -416,6 +444,7 @@ class Searcher:
             fraction /= 2                        # finer steps in the next pass
             if fraction < st.min_step_fraction:
                 break
+        self.unfixable_floor = {}
         return current
 
     # ------------------------------------------------------------------
@@ -438,10 +467,10 @@ class Searcher:
             self.record(0, "start", label, "", ev)
             self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
             if len(starts) > 1:
-                ev = self.repair(ev.schedule, 0)
+                ev = self.repair(ev.schedule, 0, give_up_above=best[0][0] if best else np.inf)
                 self.say(f"    repaired: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
                          f"unfixable cells {len(self.unfixable)}")
-            key = (len(self.unfixable), not ev.feasible, ev.cost)
+            key = (len(self.unfixable), not ev.feasible, round(self.unfixable_shortfall(ev), 3), ev.cost)
             if best is None or key < best[0]:
                 best = (key, ev, set(self.unfixable), label)
             known_unfixable |= self.unfixable
@@ -475,8 +504,11 @@ class Searcher:
             self.say(f"    hold-out check: {len(weak)} weak cells (hold-out mean fill < F)")
             if weak.empty:
                 break
-            if round_no == st.max_outer_rounds:
-                self.say("    max rounds reached - margins were raised but not searched again")
+            if round_no == st.max_outer_rounds:            # last round: make the raised margins count
+                ev = self.repair(schedule, round_no + 1)
+                schedule = ev.schedule
+                self.say(f"    max rounds reached - final repair with the raised margins: "
+                         f"feasible={ev.feasible}, mean cost {ev.cost:,.0f}")
 
         return OptimisationOutcome(start, schedule, self.margins, self.unfixable, self.log,
                                    holdout_rounds, ev, hold_cells, self.n_evaluations, label)
