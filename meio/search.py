@@ -182,7 +182,7 @@ class Searcher:
         failing = int((~cells["search_feasible"].to_numpy() & ~unfixable).sum() + (unfixable & ~kept).sum())
         return Evaluation(schedule, result, cells, cost, failing == 0, failing)
 
-    def confirmation(self, schedule: PolicySchedule) -> tuple[set, dict]:
+    def confirmation(self, schedule: PolicySchedule, with_cost: bool = False):
         """Cells that are weak on the confirmation seeds - mean fill below target, the hold-out
         rule (the search seeds already carry Z x SE and the margins) - and the mean fill of the
         unfixable cells there (an unfixable cell counts as weak below its confirmation floor)."""
@@ -201,7 +201,7 @@ class Searcher:
                     failing.add(key)
             elif mean < target:
                 failing.add(key)
-        return failing, means
+        return (failing, means, result.mean_total_cost()) if with_cost else (failing, means)
 
     def confirmed(self, schedule: PolicySchedule) -> bool:
         """Optimizer's-curse check of a move the search seeds accepted: on the independent
@@ -627,14 +627,16 @@ class Searcher:
         return best
 
     def no_new_weak_cells(self, before: Evaluation, after: Evaluation) -> bool:
-        """Confirmation for a large move: on the confirmation seeds no cell is weak after it
-        that was not weak before (always True without confirmation seeds)."""
+        """Confirmation for a large move: on the confirmation seeds it is cheaper as well and no
+        cell is weak after it that was not weak before (True without confirmation seeds).
+        A large jump changes many weeks at once, so its cost gain on the search seeds is
+        checked on independent seeds too, not only its service."""
         if self.confirm_seeds is None:
             return True
         self.confirm_floor = {}
-        weak_before, _ = self.confirmation(before.schedule)
-        weak_after, _ = self.confirmation(after.schedule)
-        return weak_after <= weak_before
+        weak_before, _, cost_before = self.confirmation(before.schedule, with_cost=True)
+        weak_after, _, cost_after = self.confirmation(after.schedule, with_cost=True)
+        return weak_after <= weak_before and cost_after < cost_before
 
     # ------------------------------------------------------------------
     # Main loop
