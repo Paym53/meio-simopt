@@ -17,7 +17,7 @@ Simulation-optimisation of the (s, S) schedule (spec v5, Section 12.3).
                      lot together with the RMW levels that feed those releases. A move
                      is kept only if the mean cost falls, the schedule stays feasible on
                      the search seeds and - on an independent set of confirmation seeds -
-                     no cell fails that did not fail before (guards against the
+                     no cell becomes weak (mean fill < F) that was not weak before (guards against the
                      optimizer's curse: among many candidates, some look feasible on the
                      search seeds by chance). An accepted move is repeated in the same
                      direction while it keeps paying off.
@@ -89,7 +89,7 @@ class Searcher:
         self.confirm_seeds = (build_scenarios(model, n_confirm, settings.base_seed + 4, "confirm")
                               if n_confirm > 0 else None)
         self.confirm_failing: set = set()    # cells failing on the confirmation seeds (current schedule)
-        self.confirm_floor: dict = {}        # unfixable cell -> lower bound on the confirmation seeds
+        self.confirm_floor: dict = {}        # unfixable cell -> mean fill on the confirmation seeds
 
     # ------------------------------------------------------------------
     def say(self, text: str) -> None:
@@ -119,28 +119,31 @@ class Searcher:
         return Evaluation(schedule, result, cells, result.mean_total_cost(), failing == 0, failing)
 
     def confirmation(self, schedule: PolicySchedule) -> tuple[set, dict]:
-        """Cells failing the search rule on the confirmation seeds (unfixable cells: those below
-        their confirmation floor) and the lower bounds of the unfixable cells there."""
+        """Cells that are weak on the confirmation seeds - mean fill below target, the hold-out
+        rule (the search seeds already carry Z x SE and the margins) - and the mean fill of the
+        unfixable cells there (an unfixable cell counts as weak below its confirmation floor)."""
         self.n_evaluations += 1
         result = simulate(self.model, schedule, self.confirm_seeds, report_details=False)
-        cells = service.apply_search_rule(service.cell_table(self.model, result), self.settings.z, self.margins)
-        failing, bounds = set(), {}
-        for p, c, w, ok, b in zip(cells["product"], cells["channel"], cells["week"],
-                                  cells["search_feasible"], cells["search_lower_bound"]):
+        cells = service.cell_table(self.model, result)
+        failing, means = set(), {}
+        for p, c, w, mean, target in zip(cells["product"], cells["channel"], cells["week"],
+                                         cells["mean_fill"], cells["target_F"]):
             key = (p, c, int(w))
+            if np.isnan(mean):
+                continue
             if key in self.unfixable:
-                if not np.isnan(b):
-                    bounds[key] = float(b)
-                    if b < self.confirm_floor.get(key, -np.inf) - 1e-9:
-                        failing.add(key)
-            elif not ok:
+                means[key] = float(mean)
+                if mean < self.confirm_floor.get(key, -np.inf) - 1e-9:
+                    failing.add(key)
+            elif mean < target:
                 failing.add(key)
-        return failing, bounds
+        return failing, means
 
     def confirmed(self, schedule: PolicySchedule) -> bool:
         """Optimizer's-curse check of a move the search seeds accepted: on the independent
-        confirmation seeds no cell may fail that did not fail before the move (the same
-        "no cell worse" rule as the week-1 lookahead). Without confirmation seeds: True."""
+        confirmation seeds no cell may become weak (mean fill < F) that was not weak before
+        the move (the same "no cell worse" idea as the week-1 lookahead). Without
+        confirmation seeds: True."""
         if self.confirm_seeds is None:
             return True
         failing, _ = self.confirmation(schedule)

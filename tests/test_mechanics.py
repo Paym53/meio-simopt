@@ -973,3 +973,21 @@ def test_bullwhip_ratio_hand_examples():
         lumpy[:, start] = demand[:, start:start + 4].sum(axis=1)              # order: no bullwhip
     assert abs(bullwhip_ratio(lumpy, demand, weeks, 0) - 1) < 1e-9
     assert bullwhip_ratio(demand, demand, [1, 2, 3, 4, 5], 0) is None       # too few buckets
+
+
+def test_confirmation_seeds_reject_a_move_that_makes_a_cell_weak():
+    s = _searcher()
+    assert s.confirm_seeds is not None and s.confirm_seeds.n_seeds == 2 * s.settings.n_search_seeds
+    sched = initial_schedule(s.model, s.settings)
+    s.confirm_failing, s.confirm_floor = s.confirmation(sched)
+    assert s.confirmed(sched)                            # the same schedule: nothing new is weak
+    starved = sched.copy()
+    starved.dc_s["FG1"][5:] = 0                          # no more orders from week 5 on
+    starved.dc_S["FG1"][5:] = 20
+    weak_before = set(s.confirm_failing)
+    assert not s.confirmed(starved)                      # new weak cells on the confirmation seeds
+    assert s.confirm_failing == weak_before              # a rejected move changes nothing
+    s.settings.confirm_seed_factor = 0
+    from meio.search import Searcher
+    plain = Searcher(s.model, s.settings, s.search_seeds, s.holdout_seeds, verbose=False)
+    assert plain.confirm_seeds is None and plain.confirmed(starved)   # switched off: no check
