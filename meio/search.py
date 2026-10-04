@@ -413,10 +413,9 @@ class Searcher:
                         break
             self.say(f"    improve pass {pass_no}: {accepted:3d} moves accepted, "
                      f"mean cost {cost_before:,.0f} -> {current.cost:,.0f} (step fraction {fraction:.3f})")
-            if accepted == 0:
-                fraction /= 2
-                if fraction < st.min_step_fraction:
-                    break
+            fraction /= 2                        # finer steps in the next pass
+            if fraction < st.min_step_fraction:
+                break
         return current
 
     # ------------------------------------------------------------------
@@ -425,14 +424,16 @@ class Searcher:
     def choose_start(self) -> tuple[PolicySchedule, Evaluation, str]:
         """Multi-start: repair every start schedule and keep the best one - fewest cells
         declared unfixable, then feasible before infeasible, then the lowest mean cost.
-        Each start is repaired with a clean list of unfixable cells; the winner's list is kept."""
+        The classic start is repaired first; the cells it cannot fix (structural: freshness
+        or lead times) are known to the later starts, which therefore do not spend repair
+        steps on them again."""
         if self.start_schedule is not None:
             starts = [("warm start (previous review, shifted)", self.start_schedule.copy())]
         else:
             starts = start_schedules(self.model, self.settings)
-        best = None
+        best, known_unfixable = None, set()
         for label, schedule in starts:
-            self.unfixable = set()
+            self.unfixable = set(known_unfixable)
             ev = self.evaluate(schedule.copy())
             self.record(0, "start", label, "", ev)
             self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
@@ -443,6 +444,7 @@ class Searcher:
             key = (len(self.unfixable), not ev.feasible, ev.cost)
             if best is None or key < best[0]:
                 best = (key, ev, set(self.unfixable), label)
+            known_unfixable |= self.unfixable
         _, ev, self.unfixable, label = best
         if len(starts) > 1:
             self.say(f"  chosen start: {label}")
