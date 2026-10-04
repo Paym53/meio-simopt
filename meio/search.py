@@ -21,6 +21,9 @@ Simulation-optimisation of the (s, S) schedule (spec v5, Section 12.3).
                      optimizer's curse: among many candidates, some look feasible on the
                      search seeds by chance). An accepted move is repeated in the same
                      direction while it keeps paying off.
+        B2. RESTRUCTURE (first round): large-neighbourhood moves to the price-break lots
+                     with RM support, repaired and improved, kept only if cheaper and
+                     confirmed (local steps cannot cross the dearer band in between)
         C. HOLD-OUT: simulate the hold-out seeds, raise the margin of weak cells
     until the hold-out check finds no weak cell (or max rounds)
 
@@ -38,7 +41,8 @@ import pandas as pd
 
 from . import service
 from .config import ModelInput, SearchSettings
-from .policy import PolicySchedule, dc_order_weeks, feeding_release_weeks, rm_order_weeks, start_schedules
+from .policy import (PolicySchedule, dc_order_weeks, feeding_release_weeks, price_break_lots, rm_order_weeks,
+                     start_schedules)
 from .scenarios import ScenarioSet, build_scenarios
 from .simulation import SimResult, simulate
 
@@ -421,7 +425,8 @@ class Searcher:
     # B. Improve
     # ------------------------------------------------------------------
     def improve(self, current: Evaluation, round_no: int, n_levels: int | None = None,
-                n_passes: int | None = None, fraction: float | None = None) -> Evaluation:
+                n_passes: int | None = None, fraction: float | None = None,
+                phase: str = "improve") -> Evaluation:
         """Coarse-to-fine pattern search (see the module docstring). One pass goes through
         all block levels, from whole-horizon blocks down to single weeks; at every block
         the first move that lowers the cost (and stays feasible) is accepted and repeated
@@ -483,7 +488,7 @@ class Searcher:
                             accepted += 1
                             where = (f"weeks {block[0]}-{block[-1]}" if kind in ("DC", "RM")
                                      else "(whole horizon)")
-                            self.record(round_no, "improve", f"{move}: {kind} {name} {where}",
+                            self.record(round_no, phase, f"{move}: {kind} {name} {where}",
                                         f"pass {pass_no}, step fraction {fraction:.3f}", ev)
                             repeats += 1
                             if repeats > st.max_move_repeats:
@@ -503,6 +508,70 @@ class Searcher:
                 break
         self.unfixable_floor, self.confirm_floor = {}, {}
         return current
+
+    # ------------------------------------------------------------------
+    # B2. Restructure: large-neighbourhood moves to the price-break lots
+    # ------------------------------------------------------------------
+    def restructure(self, current: Evaluation, round_no: int) -> Evaluation:
+        """Large-neighbourhood moves that small steps cannot make (iterated local search).
+
+        With all-units discounts the cost landscape has separate valleys: a larger lot is
+        cheaper per unit, but only once the lot reaches the next price break AND the RMW
+        holds enough raw material for it; every small step on the way is dearer or cuts
+        releases. So, per product and price break above its current typical lot: set every
+        DC lot to the break (cap included), raise the RMW levels that feed the releases by
+        a share of the extra need, repair, run one coarse improve pass, and keep the result
+        only if it is feasible, cheaper and confirmed; after an accepted jump one fine
+        improve pass follows. Without price breaks: no change."""
+        st, model = self.settings, self.model
+        if not current.feasible or st.restructure_shares == ():
+            return current
+        best = current
+        for p in model.products:
+            weeks = dc_order_weeks(model, p)
+            if not weeks:
+                continue
+            w = np.asarray(weeks)
+            typical_lot = int(np.median((best.schedule.dc_S[p.name] - best.schedule.dc_s[p.name])[w]))
+            breaks = [b for b in price_break_lots(model, p) if b > typical_lot][:2]
+            for lot in breaks:
+                for share in st.restructure_shares:
+                    candidate = best.schedule.copy()
+                    s_, S_ = candidate.dc_s[p.name], candidate.dc_S[p.name]
+                    S_[w] += np.maximum(0, lot - (S_ - s_)[w])
+                    candidate.dc_cap[p.name] = max(candidate.dc_cap[p.name], lot)
+                    extra = share * max(0, lot - typical_lot)
+                    for mat_name, rm_weeks in self.rm_weeks_feeding(p.name, weeks).items():
+                        add = int(np.ceil(p.bom[mat_name] * extra))
+                        candidate.rm_s[mat_name][rm_weeks] += add
+                        candidate.rm_S[mat_name][rm_weeks] += add
+                    unfixable_before = set(self.unfixable)
+                    ev = self.repair(candidate, round_no, give_up_above=len(unfixable_before))
+                    label = f"lot {lot} for {p.name} with {share:.0%} RM support"
+                    if ev.feasible and len(self.unfixable) == len(unfixable_before):
+                        ev = self.improve(ev, round_no, n_levels=st.race_levels, n_passes=1,
+                                          phase="restructure trial")
+                    if (ev.feasible and len(self.unfixable) == len(unfixable_before)
+                            and ev.cost < best.cost - 1e-6 and self.no_new_weak_cells(best, ev)):
+                        self.say(f"    restructure: {label}: mean cost {best.cost:,.0f} -> {ev.cost:,.0f}")
+                        self.record(round_no, "restructure", label, "accepted", ev)
+                        best = ev
+                    else:
+                        self.unfixable = unfixable_before
+                        self.record(round_no, "restructure", label, "rejected", ev)
+        if best is not current:                   # fine-tune the new lot structure once
+            best = self.improve(best, round_no, n_passes=1, fraction=st.step_fraction / 2)
+        return best
+
+    def no_new_weak_cells(self, before: Evaluation, after: Evaluation) -> bool:
+        """Confirmation for a large move: on the confirmation seeds no cell is weak after it
+        that was not weak before (always True without confirmation seeds)."""
+        if self.confirm_seeds is None:
+            return True
+        self.confirm_floor = {}
+        weak_before, _ = self.confirmation(before.schedule)
+        weak_after, _ = self.confirmation(after.schedule)
+        return weak_after <= weak_before
 
     # ------------------------------------------------------------------
     # Main loop
@@ -533,7 +602,8 @@ class Searcher:
                 if st.race_levels > 0 and ev.feasible and (best is None or len(self.unfixable) <= len(best[2])):
                     # racing: one coarse pass (whole horizon and halves) before comparing,
                     # because the cost right after repair says little about where a start leads
-                    ev = self.improve(ev, 0, n_levels=self.settings.race_levels, n_passes=1)
+                    ev = self.improve(ev, 0, n_levels=self.settings.race_levels, n_passes=1,
+                                      phase="race")
             key = (round(self.service_gap(ev), 2), ev.cost)
             if best is None or key < best[0]:
                 best = (key, ev, set(self.unfixable), label)
@@ -557,6 +627,7 @@ class Searcher:
                      f"unfixable cells so far {len(self.unfixable)}")
             if round_no == 1:
                 ev = self.improve(ev, round_no)
+                ev = self.restructure(ev, round_no)
             else:                                 # converged already: one finer pass after the repair
                 ev = self.improve(ev, round_no, n_passes=1, fraction=st.step_fraction / 2)
             schedule = ev.schedule

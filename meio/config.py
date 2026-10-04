@@ -292,6 +292,7 @@ class SearchSettings:
     max_move_repeats: int = 8          # improve: repeat an accepted move in the same direction up to this often
     race_levels: int = 2               # multi-start: coarse block levels of the racing pass per start (0 = no racing)
     confirm_seed_factor: float = 2.0   # confirmation seeds = factor x search seeds (0 = no confirmation)
+    restructure_shares: tuple = (0.5, 1.0)  # restructure: RM support as share of the extra lot need (() = off)
 
 
 PRESETS = {
