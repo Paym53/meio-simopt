@@ -377,7 +377,8 @@ class Searcher:
     # ------------------------------------------------------------------
     # B. Improve
     # ------------------------------------------------------------------
-    def improve(self, current: Evaluation, round_no: int) -> Evaluation:
+    def improve(self, current: Evaluation, round_no: int, n_levels: int | None = None,
+                n_passes: int | None = None) -> Evaluation:
         """Coarse-to-fine pattern search (see the module docstring). One pass goes through
         all block levels, from whole-horizon blocks down to single weeks; at every block
         the first move that lowers the cost (and stays feasible) is accepted and repeated
@@ -396,11 +397,12 @@ class Searcher:
             "RM": ["lower s and S", "lower S (smaller orders)", "raise S (larger orders)"],
             "DC cap": ["lower", "raise"], "RM floor": ["lower", "raise"],
         }
-        n_levels = max(len(self.block_sizes(len(weeks))) for _, _, weeks in items)
+        all_levels = max(len(self.block_sizes(len(weeks))) for _, _, weeks in items)
+        n_levels = min(n_levels or all_levels, all_levels)
         fraction = st.step_fraction
         self.unfixable_floor = self.service_floors(current)     # unfixable cells: never worse
 
-        for pass_no in range(1, st.max_improve_passes + 1):
+        for pass_no in range(1, (n_passes or st.max_improve_passes) + 1):
             accepted = 0
             cost_before = current.cost
             for level in range(n_levels):
@@ -451,11 +453,14 @@ class Searcher:
     # Main loop
     # ------------------------------------------------------------------
     def choose_start(self) -> tuple[PolicySchedule, Evaluation, str]:
-        """Multi-start: repair every start schedule and keep the best one - fewest cells
-        declared unfixable, then feasible before infeasible, then the lowest mean cost.
+        """Multi-start: repair every start schedule, give each feasible one a coarse racing
+        pass (whole-horizon and half-horizon blocks) and keep the best one - fewest cells
+        declared unfixable, then feasible before infeasible, then the smallest service gap
+        on unfixable cells, then the lowest mean cost.
         The classic start is repaired first; the cells it cannot fix (structural: freshness
         or lead times) are known to the later starts, which therefore do not spend repair
         steps on them again."""
+        st = self.settings
         if self.start_schedule is not None:
             starts = [("warm start (previous review, shifted)", self.start_schedule.copy())]
         else:
@@ -470,6 +475,10 @@ class Searcher:
                 ev = self.repair(ev.schedule, 0, give_up_above=best[0][0] if best else np.inf)
                 self.say(f"    repaired: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
                          f"unfixable cells {len(self.unfixable)}")
+                if st.race_levels > 0 and ev.feasible and (best is None or len(self.unfixable) <= best[0][0]):
+                    # racing: one coarse pass (whole horizon and halves) before comparing,
+                    # because the cost right after repair says little about where a start leads
+                    ev = self.improve(ev, 0, n_levels=self.settings.race_levels, n_passes=1)
             key = (len(self.unfixable), not ev.feasible, round(self.unfixable_shortfall(ev), 3), ev.cost)
             if best is None or key < best[0]:
                 best = (key, ev, set(self.unfixable), label)

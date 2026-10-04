@@ -289,6 +289,7 @@ class SearchSettings:
     lookahead_rm_steps: int = 4        # lookahead: RM candidates = rule quantity +/- up to this many steps
     max_starts: int = 5                # multi-start: quantile, economic-lot and price-break starts (policy.start_schedules)
     max_move_repeats: int = 8          # improve: repeat an accepted move in the same direction up to this often
+    race_levels: int = 2               # multi-start: coarse block levels of the racing pass per start (0 = no racing)
 
 
 PRESETS = {
