@@ -378,12 +378,15 @@ class Searcher:
     # B. Improve
     # ------------------------------------------------------------------
     def improve(self, current: Evaluation, round_no: int, n_levels: int | None = None,
-                n_passes: int | None = None) -> Evaluation:
+                n_passes: int | None = None, fraction: float | None = None) -> Evaluation:
         """Coarse-to-fine pattern search (see the module docstring). One pass goes through
         all block levels, from whole-horizon blocks down to single weeks; at every block
         the first move that lowers the cost (and stays feasible) is accepted and repeated
-        while it keeps paying off. The step fraction is halved after a pass without
-        accepted moves."""
+        while it keeps paying off. The step fraction is halved after every pass.
+
+        Adaptive move selection: a move type that found nothing at a block level in one
+        pass is not tried at that level in the next pass (unless the whole pass found
+        nothing). This spends the simulations where improvements are found."""
         st, model = self.settings, self.model
         if not current.feasible:
             self.say("    improve skipped: schedule is not feasible on the search seeds")
@@ -399,12 +402,14 @@ class Searcher:
         }
         all_levels = max(len(self.block_sizes(len(weeks))) for _, _, weeks in items)
         n_levels = min(n_levels or all_levels, all_levels)
-        fraction = st.step_fraction
+        fraction = fraction or st.step_fraction
         self.unfixable_floor = self.service_floors(current)     # unfixable cells: never worse
+        productive = None                     # (kind, level, move) that found something last pass
 
         for pass_no in range(1, (n_passes or st.max_improve_passes) + 1):
             accepted = 0
             cost_before = current.cost
+            hits: set = set()
             for level in range(n_levels):
                 blocks = []
                 for kind, name, weeks in items:
@@ -417,12 +422,15 @@ class Searcher:
                 for i in self.rng.permutation(len(blocks)):
                     kind, name, block = blocks[i]
                     for move in moves[kind]:
+                        if productive is not None and (kind, level, move) not in productive:
+                            continue
                         candidate = self.moved_block(current.schedule, kind, name, block, move, fraction)
                         if candidate is None:
                             continue
                         ev = self.evaluate(candidate)
                         if not (ev.feasible and ev.cost < current.cost - 1e-6):
                             continue
+                        hits.add((kind, level, move))
                         repeats = 0
                         while True:                  # accepted: keep going in this direction
                             current = ev
@@ -443,6 +451,7 @@ class Searcher:
                         break
             self.say(f"    improve pass {pass_no}: {accepted:3d} moves accepted, "
                      f"mean cost {cost_before:,.0f} -> {current.cost:,.0f} (step fraction {fraction:.3f})")
+            productive = hits if accepted else None
             fraction /= 2                        # finer steps in the next pass
             if fraction < st.min_step_fraction:
                 break
@@ -500,7 +509,10 @@ class Searcher:
             schedule = ev.schedule
             self.say(f"    repair: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
                      f"unfixable cells so far {len(self.unfixable)}")
-            ev = self.improve(ev, round_no)
+            if round_no == 1:
+                ev = self.improve(ev, round_no)
+            else:                                 # converged already: one finer pass after the repair
+                ev = self.improve(ev, round_no, n_passes=1, fraction=st.step_fraction / 2)
             schedule = ev.schedule
 
             hold_result = simulate(self.model, schedule, self.holdout_seeds, report_details=False)
@@ -515,8 +527,9 @@ class Searcher:
                 break
             if round_no == st.max_outer_rounds:            # last round: make the raised margins count
                 ev = self.repair(schedule, round_no + 1)
+                ev = self.improve(ev, round_no + 1, n_passes=1, fraction=st.step_fraction / 2)
                 schedule = ev.schedule
-                self.say(f"    max rounds reached - final repair with the raised margins: "
+                self.say(f"    max rounds reached - final repair + improve with the raised margins: "
                          f"feasible={ev.feasible}, mean cost {ev.cost:,.0f}")
 
         return OptimisationOutcome(start, schedule, self.margins, self.unfixable, self.log,

@@ -944,7 +944,7 @@ def test_improve_never_lowers_the_service_of_unfixable_cells():
 
 
 def test_search_keeps_the_best_start_and_never_ends_worse_than_its_repaired_start():
-    s = _searcher(n=40)
+    s = _searcher(build_example_input(horizon=16), n=30)  # short horizon: a fast full search
     s.settings.max_improve_passes = 1
     s.settings.max_outer_rounds = 1
     out = s.run()
@@ -952,10 +952,12 @@ def test_search_keeps_the_best_start_and_never_ends_worse_than_its_repaired_star
     assert [r["action"] for r in start_rows][0] == "quantile start"
     repaired = [r for r in out.search_log if r["round"] == 0 and r["phase"] != "start"]
     assert out.chosen_start in [r["action"] for r in start_rows]
-    improve = [r for r in out.search_log if r["phase"] == "improve"]
+    improve = [r for r in out.search_log if r["phase"] == "improve" and r["round"] == 1]
     costs = [r["mean_cost"] for r in improve]
     assert costs == sorted(costs, reverse=True)          # every accepted move lowers the cost
-    assert all(r["feasible"] for r in improve)
+    assert all(r["feasible"] for r in out.search_log if r["phase"] == "improve")
+    chosen_rows = [r for r in start_rows if r["action"] == out.chosen_start]
+    assert len(chosen_rows) == 1
 
 
 def test_bullwhip_ratio_hand_examples():
