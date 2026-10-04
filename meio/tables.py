@@ -209,6 +209,28 @@ def cost_table(result: SimResult) -> pd.DataFrame:
     return df
 
 
+def bullwhip_ratio(orders: np.ndarray, demand: np.ndarray, order_weeks: list[int], shift: int,
+                   bucket: int = 4) -> float | None:
+    """Bullwhip ratio of one stage: variance of its orders divided by the variance of the
+    demand those orders are meant for, both summed over buckets of `bucket` weeks.
+
+    orders, demand: (n_seeds, H + 1) arrays (FG equivalents). The orders of weeks
+    order_weeks are compared with the demand `shift` weeks later (the median time until the
+    order is available for sale). Buckets of several weeks remove the pure lumpiness of
+    lot sizing; what remains is real amplification. About 1 = orders follow demand without
+    amplification, clearly above 1 = bullwhip. Pooled over seeds (mean variance / mean
+    variance). None if fewer than three buckets fit into the order weeks."""
+    weeks = [t for t in order_weeks if t + shift < demand.shape[1]]
+    n_buckets = len(weeks) // bucket
+    if n_buckets < 3:
+        return None
+    weeks = np.asarray(weeks[:n_buckets * bucket])
+    o = orders[:, weeks].reshape(len(orders), n_buckets, bucket).sum(axis=2)
+    d = demand[:, weeks + shift].reshape(len(demand), n_buckets, bucket).sum(axis=2)
+    var_d = d.var(axis=1, ddof=1).mean()
+    return float(o.var(axis=1, ddof=1).mean() / var_d) if var_d > 0 else None
+
+
 def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
     weeks = model.evaluation_weeks
     rows = []
@@ -230,12 +252,24 @@ def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
                      dc["cut_by_capacity"][:, 1:][order_weeks].sum() / n_orders if n_orders else None, ""))
         rows.append((f"{p.name}: average DC stock end of week", dc["on_hand_end"][:, 1:].mean(), "units"))
         rows.append((f"{p.name}: releases per seed", (dc["released_P"][:, 1:] > 0).sum(axis=1).mean(), ""))
+        rows.append((f"{p.name}: bullwhip ratio of production releases",
+                     bullwhip_ratio(dc["released_P"], dc["demand"], dc_order_weeks(model, p),
+                                    model.release_to_dc_median(p)),
+                     "variance of 4-week releases / variance of the 4-week demand they serve; "
+                     "about 1 = no amplification"))
     for m in model.materials:
         rm = result.rm[m.name]
         receipts = rm["receipts"][:, 1:].sum()
         rows.append((f"{m.name}: average RMW stock end of week", rm["on_hand_end"][:, 1:].mean(), "units"))
         rows.append((f"{m.name}: RM waste as share of receipts", rm["waste"][:, 1:].sum() / receipts if receipts else None, ""))
         rows.append((f"{m.name}: supplier orders per seed", (rm["ordered_O"][:, 1:] > 0).sum(axis=1).mean(), ""))
+        users = model.products_using(m.name)
+        need = sum(p.bom[m.name] * result.dc[p.name]["demand"] for p in users)
+        shift = m.lead_time_median + min(model.release_to_dc_median(p) for p in users)
+        rows.append((f"{m.name}: bullwhip ratio of supplier orders",
+                     bullwhip_ratio(rm["ordered_O"], need, rm_order_weeks(model, m), shift),
+                     "variance of 4-week orders / variance of the 4-week RM need (BOM x demand) they "
+                     "serve; about 1 = no amplification (empty: too few order weeks)"))
     return pd.DataFrame(rows, columns=["KPI", "value", "note"])
 
 

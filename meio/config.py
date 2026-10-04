@@ -287,6 +287,8 @@ class SearchSettings:
     initial_cap_weeks: float = 2.0     # start value of the DC order cap: weeks of mean demand
     initial_floor_share: float = 1.0   # start value of the RMW minimum: share of mean use over the median supplier lead time
     lookahead_rm_steps: int = 4        # lookahead: RM candidates = rule quantity +/- up to this many steps
+    max_starts: int = 5                # multi-start: quantile, economic-lot and price-break starts (policy.start_schedules)
+    max_move_repeats: int = 8          # improve: repeat an accepted move in the same direction up to this often
 
 
 PRESETS = {

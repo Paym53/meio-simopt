@@ -92,14 +92,22 @@ def _round_up(x: float, multiple: int) -> int:
     return int(np.ceil(x / multiple) * multiple)
 
 
-def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySchedule:
+def initial_schedule(model: ModelInput, settings: SearchSettings,
+                     dc_cover: dict[str, int] | None = None, rm_cover: dict[str, int] | None = None,
+                     dc_min_lot: dict[str, int] | None = None) -> PolicySchedule:
     """Quantile-based start: s = q0-quantile of demand over the protection interval,
-    S = q0-quantile over the interval plus m0 extra weeks. The intervals use random
-    lead times, so the start reflects both forecast and lead-time uncertainty.
+    S = q0-quantile over the interval plus m extra weeks (the lot, "cover"). The intervals
+    use random lead times, so the start reflects both forecast and lead-time uncertainty.
 
     DC  interval for an order in week t: weeks t .. t + tau_p + L~
     RMW interval for an order in week t: weeks t .. t + G~ + tau_p + L~   (times BOM quantity)
     (tau_p = RMW -> PF time of the product's slowest BOM material, deterministic)
+
+    Optional (used by start_schedules for cost-aware starts; default = the classic start):
+      dc_cover / rm_cover : extra weeks of cover m per product / material (default m0)
+      dc_min_lot          : minimum lot S - s per product, e.g. a price-break quantity
+    The order cap is never below the largest lot S - s, so the cap does not cut the lot.
+    The random draws do not depend on these options: all starts see the same samples.
     """
     tau = {p.name: model.rmw_to_pf_lead_time(p) for p in model.products}
     rng = np.random.default_rng(settings.base_seed + 999)   # own stream, never reused
@@ -113,20 +121,23 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
     dc_s, dc_S = {}, {}
     for p in model.products:
         q0 = settings.initial_quantile or max(c.target_fill_rate for c in p.channels)
+        cover = (dc_cover or {}).get(p.name, m0)
+        min_lot = max((dc_min_lot or {}).get(p.name, 0), p.batch_size)
         s_arr = np.zeros(H + 1, dtype=np.int64)
         S_arr = np.zeros(H + 1, dtype=np.int64)
         for t in dc_order_weeks(model, p):
             L = tau[p.name] + sample_lead_time(p.lead_time_dist, n, rng)
             s_val = np.quantile(_window_sum(cumulative[p.name], t, t + L), q0)
-            S_val = np.quantile(_window_sum(cumulative[p.name], t, t + L + m0), q0)
+            S_val = np.quantile(_window_sum(cumulative[p.name], t, t + L + cover), q0)
             s_arr[t] = _round_up(s_val, p.batch_size)
-            S_arr[t] = max(_round_up(S_val, p.batch_size), s_arr[t] + p.batch_size)
+            S_arr[t] = max(_round_up(S_val, p.batch_size), s_arr[t] + _round_up(min_lot, p.batch_size))
         dc_s[p.name], dc_S[p.name] = s_arr, S_arr
 
     rm_s, rm_S = {}, {}
     for m in model.materials:
         users = model.products_using(m.name)
         q0 = settings.initial_quantile or max(c.target_fill_rate for p in users for c in p.channels)
+        cover = (rm_cover or {}).get(m.name, m0)
         s_arr = np.zeros(H + 1, dtype=np.int64)
         S_arr = np.zeros(H + 1, dtype=np.int64)
         for t in rm_order_weeks(model, m):
@@ -135,7 +146,7 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
             for p in users:
                 L = tau[p.name] + sample_lead_time(p.lead_time_dist, n, rng)
                 need_s += p.bom[m.name] * _window_sum(cumulative[p.name], t, t + G + L)
-                need_S += p.bom[m.name] * _window_sum(cumulative[p.name], t, t + G + L + m0)
+                need_S += p.bom[m.name] * _window_sum(cumulative[p.name], t, t + G + L + cover)
             s_arr[t] = _round_up(np.quantile(need_s, q0), m.batch_size)
             S_arr[t] = max(_round_up(np.quantile(need_S, q0), m.batch_size), s_arr[t] + m.batch_size)
         rm_s[m.name], rm_S[m.name] = s_arr, S_arr
@@ -146,12 +157,72 @@ def initial_schedule(model: ModelInput, settings: SearchSettings) -> PolicySched
     dc_cap, rm_floor = {}, {}
     mean_weekly = {p.name: _mean_weekly_demand(model, p) for p in model.products}
     for p in model.products:
-        dc_cap[p.name] = max(p.moq, _round_up(settings.initial_cap_weeks * mean_weekly[p.name], p.batch_size))
+        largest_lot = int((dc_S[p.name] - dc_s[p.name]).max())
+        dc_cap[p.name] = max(p.moq, _round_up(settings.initial_cap_weeks * mean_weekly[p.name], p.batch_size),
+                             largest_lot)
     for m in model.materials:
         use = sum(p.bom[m.name] * mean_weekly[p.name] for p in model.products_using(m.name))
         rm_floor[m.name] = _round_up(settings.initial_floor_share * use * m.lead_time_median, m.batch_size)
 
     return PolicySchedule(dc_s, dc_S, rm_s, rm_S, dc_cap, rm_floor)
+
+
+def economic_cover_weeks(model: ModelInput) -> tuple[dict[str, int], dict[str, int]]:
+    """Weeks of demand per order that balance the fixed order cost against holding cost
+    (economic order quantity, EOQ = sqrt(2 K D / h), expressed in weeks of mean demand D).
+
+    Shelf life bounds the cover: an FG lot must sell before it gets too old for the
+    strictest channel, an RM lot before it can no longer be shipped. Returns
+    ({product: weeks}, {material: weeks}), at least 1 week each."""
+    mean_weekly = {p.name: _mean_weekly_demand(model, p) for p in model.products}
+    dc_cover, rm_cover = {}, {}
+    for p in model.products:
+        demand = max(mean_weekly[p.name], 1e-9)
+        eoq = np.sqrt(2 * p.fixed_cost_per_release * demand / max(p.holding_cost, 1e-9))
+        longest = max(1, min(p.max_age_for_channel(c) for c in p.channels) - 1)
+        dc_cover[p.name] = int(np.clip(round(eoq / demand), 1, longest))
+    for m in model.materials:
+        use = max(sum(p.bom[m.name] * mean_weekly[p.name] for p in model.products_using(m.name)), 1e-9)
+        eoq = np.sqrt(2 * m.fixed_order_cost * use / max(m.holding_cost, 1e-9))
+        rm_cover[m.name] = int(np.clip(round(eoq / use), 1, max(1, m.max_shippable_age - 1)))
+    return dc_cover, rm_cover
+
+
+def price_break_lots(model: ModelInput, product: Product) -> list[int]:
+    """Lot sizes at which a cheaper production or transport band starts (all-units
+    discounts), rounded up to the batch size. Only lots the product can use: at least the
+    MOQ, within the weekly capacity, and sold before the strictest channel's age limit."""
+    mean_weekly = max(_mean_weekly_demand(model, product), 1e-9)
+    longest = max(1, min(product.max_age_for_channel(c) for c in product.channels) - 1)
+    lots = set()
+    for tier in product.production_tiers[1:] + product.transport_tiers[1:]:
+        lot = _round_up(tier.lower, product.batch_size)
+        if product.moq < lot <= model.production_capacity and lot <= longest * mean_weekly:
+            lots.add(lot)
+    return sorted(lots)
+
+
+def start_schedules(model: ModelInput, settings: SearchSettings) -> list[tuple[str, PolicySchedule]]:
+    """Candidate start schedules of the search (multi-start), all from the same samples:
+
+      1. the classic quantile start (one week of extra cover),
+      2. an economic-lot start (cover = EOQ in weeks, per product and material),
+      3. per product, the economic-lot start with the lot raised to each price break
+         (all-units discounts make a larger lot cheaper per unit; local steps of the
+         search cannot jump over the more expensive band in between).
+    The search repairs each start and continues from the cheapest feasible one."""
+    starts = [("quantile start", initial_schedule(model, settings))]
+    dc_cover, rm_cover = economic_cover_weeks(model)
+    economic = initial_schedule(model, settings, dc_cover=dc_cover, rm_cover=rm_cover)
+    starts.append(("economic-lot start", economic))
+    for p in model.products:
+        current_lot = int((economic.dc_S[p.name] - economic.dc_s[p.name]).max())
+        for lot in price_break_lots(model, p):
+            if lot > current_lot:
+                starts.append((f"price-break start {p.name} lot {lot}",
+                               initial_schedule(model, settings, dc_cover=dc_cover, rm_cover=rm_cover,
+                                                dc_min_lot={p.name: lot})))
+    return starts[:max(1, settings.max_starts)]
 
 
 def _mean_weekly_demand(model: ModelInput, product: Product) -> float:

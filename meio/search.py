@@ -1,21 +1,30 @@
 """
 Simulation-optimisation of the (s, S) schedule (spec v5, Section 12.3).
 
-The search is a simple, transparent baseline:
-
-    start from the quantile-based schedule
+    MULTI-START: build several start schedules (policy.start_schedules): the classic
+                 quantile start, an economic-lot start (EOQ cover per item, bounded by
+                 shelf life) and price-break starts (lots at the all-units discount
+                 breaks). Repair each and continue from the cheapest feasible one.
     repeat (outer round):
         A. REPAIR  : while a cell fails the search rule, raise the levels that feed
                      the earliest failing week (DC levels, or RMW levels if the
                      releases in those weeks were cut by missing raw material)
-        B. IMPROVE : go through all (location, item, week) blocks and try small moves
-                     that lower the mean cost; keep a move only if the schedule stays
-                     feasible on the search seeds
+        B. IMPROVE : coarse-to-fine pattern search. Moves act on BLOCKS of order weeks:
+                     first the whole horizon of an item (its safety level and lot size
+                     as a whole), then halves, quarters ... down to single weeks. Move
+                     types: lower s and S (less safety stock), lower / raise S (smaller /
+                     larger lots), and a coordinated echelon move that changes the DC
+                     lot together with the RMW levels that feed those releases. A move
+                     is kept only if the mean cost falls and the schedule stays feasible
+                     on the search seeds; an accepted move is repeated in the same
+                     direction while it keeps paying off.
         C. HOLD-OUT: simulate the hold-out seeds, raise the margin of weak cells
     until the hold-out check finds no weak cell (or max rounds)
 
 All candidates are compared on the same search seeds (common random numbers).
-Improvements of the algorithm itself are planned for later.
+Moving whole blocks keeps the levels following the forecast (no erratic week-to-week
+jumps that would make orders nervous), and searches the few directions that matter
+economically first; single-week moves then fine-tune.
 """
 from __future__ import annotations
 
@@ -26,7 +35,7 @@ import pandas as pd
 
 from . import service
 from .config import ModelInput, SearchSettings
-from .policy import PolicySchedule, dc_order_weeks, feeding_release_weeks, initial_schedule, rm_order_weeks
+from .policy import PolicySchedule, dc_order_weeks, feeding_release_weeks, rm_order_weeks, start_schedules
 from .scenarios import ScenarioSet
 from .simulation import SimResult, simulate
 
@@ -53,6 +62,7 @@ class OptimisationOutcome:
     last_search_eval: Evaluation | None = None
     last_holdout_cells: pd.DataFrame | None = None
     n_evaluations: int = 0
+    chosen_start: str = ""
 
 
 class Searcher:
@@ -141,6 +151,82 @@ class Searcher:
         else:
             raise ValueError(move)
         return new
+
+    def rm_weeks_feeding(self, product_name: str, release_weeks) -> dict[str, list[int]]:
+        """RMW order weeks of each BOM material whose deliveries can arrive by the given
+        DC release weeks (the RM leaves the RMW in the release week)."""
+        p = next(x for x in self.model.products if x.name == product_name)
+        feeding = {}
+        for mat_name in p.bom:
+            m = self.model.material(mat_name)
+            allowed = set(rm_order_weeks(self.model, m))
+            feeding[mat_name] = sorted({o for r in release_weeks
+                                        for o in range(r - m.lead_time_max, r - m.lead_time_min + 1)
+                                        if o in allowed})
+        return feeding
+
+    def moved_block(self, schedule: PolicySchedule, kind: str, name: str, weeks: list[int],
+                    move: str, fraction: float) -> PolicySchedule | None:
+        """Copy of the schedule with one move applied to a block of order weeks (the same
+        absolute step in every week of the block), or None if the move is not allowed.
+
+        A block of one week is the classic single-week move. "lot with RM support" moves
+        the DC lot S - s and, by BOM x the same step, the RMW (s, S) of the weeks that
+        feed those releases: the echelon levels upstream follow the downstream lot, so
+        a larger FG lot is not cut by missing raw material (and vice versa)."""
+        if kind in ("DC cap", "RM floor"):
+            return self.moved(schedule, kind, name, 0, move, fraction)
+        new = schedule.copy()
+        s, S, batch = self.levels(new, kind, name)
+        w = np.asarray(weeks)
+        step = self.step_size(int(S[w].mean()), batch, fraction)
+        if move == "lower s and S":
+            if (s[w] - step < 0).any():
+                return None
+            s[w] -= step
+            S[w] -= step
+        elif move == "raise s and S":
+            s[w] += step
+            S[w] += step
+        elif move in ("lower S (smaller orders)", "lower lot with RM support"):
+            if (S[w] - step < s[w] + batch).any():
+                return None
+            S[w] -= step
+        elif move in ("raise S (larger orders)", "raise lot with RM support"):
+            S[w] += step
+        else:
+            raise ValueError(move)
+        if move.endswith("with RM support"):
+            p = next(x for x in self.model.products if x.name == name)
+            sign = 1 if move.startswith("raise") else -1
+            for mat_name, rm_weeks in self.rm_weeks_feeding(name, list(weeks)).items():
+                if not rm_weeks:
+                    continue
+                rs, rS = new.rm_s[mat_name], new.rm_S[mat_name]
+                rw = np.asarray(rm_weeks)
+                rm_step = int(np.ceil(p.bom[mat_name] * step))
+                if sign < 0 and (rs[rw] - rm_step < 0).any():
+                    return None
+                rs[rw] += sign * rm_step
+                rS[rw] += sign * rm_step
+        if kind == "DC":                       # the order cap must not cut the new lot
+            new.dc_cap[name] = max(new.dc_cap[name], int((S - s).max()))
+        return new
+
+    @staticmethod
+    def week_blocks(weeks: list[int], size: int) -> list[list[int]]:
+        """Consecutive blocks of `size` order weeks (the last one may be shorter)."""
+        return [weeks[i:i + size] for i in range(0, len(weeks), size)]
+
+    @staticmethod
+    def block_sizes(n_weeks: int) -> list[int]:
+        """Coarse-to-fine block sizes for an item with n_weeks order weeks:
+        n, n/2, n/4, ... (rounded up), ending with single weeks."""
+        sizes, size = [], n_weeks
+        while size > 1:
+            sizes.append(size)
+            size = int(np.ceil(size / 2))
+        return sizes + [1] if n_weeks >= 1 else []
 
     # ------------------------------------------------------------------
     # A. Repair
@@ -265,34 +351,65 @@ class Searcher:
     # B. Improve
     # ------------------------------------------------------------------
     def improve(self, current: Evaluation, round_no: int) -> Evaluation:
+        """Coarse-to-fine pattern search (see the module docstring). One pass goes through
+        all block levels, from whole-horizon blocks down to single weeks; at every block
+        the first move that lowers the cost (and stays feasible) is accepted and repeated
+        while it keeps paying off. The step fraction is halved after a pass without
+        accepted moves."""
         st, model = self.settings, self.model
         if not current.feasible:
             self.say("    improve skipped: schedule is not feasible on the search seeds")
             return current
-        blocks = [("DC", p.name, t) for p in model.products for t in dc_order_weeks(model, p)]
-        blocks += [("RM", m.name, t) for m in model.materials for t in rm_order_weeks(model, m)]
-        blocks += [("DC cap", p.name, 0) for p in model.products]
-        blocks += [("RM floor", m.name, 0) for m in model.materials]
-        level_moves = ["lower s and S", "lower S (smaller orders)", "raise S (larger orders)"]
+        items = [("DC", p.name, dc_order_weeks(model, p)) for p in model.products]
+        items += [("RM", m.name, rm_order_weeks(model, m)) for m in model.materials]
+        items = [(kind, name, weeks) for kind, name, weeks in items if weeks]
+        moves = {
+            "DC": ["lower s and S", "lower lot with RM support", "lower S (smaller orders)",
+                   "raise lot with RM support", "raise S (larger orders)"],
+            "RM": ["lower s and S", "lower S (smaller orders)", "raise S (larger orders)"],
+            "DC cap": ["lower", "raise"], "RM floor": ["lower", "raise"],
+        }
+        n_levels = max(len(self.block_sizes(len(weeks))) for _, _, weeks in items)
         fraction = st.step_fraction
 
         for pass_no in range(1, st.max_improve_passes + 1):
             accepted = 0
             cost_before = current.cost
-            for i in self.rng.permutation(len(blocks)):
-                kind, name, t = blocks[i]
-                moves = level_moves if kind in ("DC", "RM") else ["lower", "raise"]
-                for move in moves:
-                    candidate = self.moved(current.schedule, kind, name, t, move, fraction)
-                    if candidate is None:
-                        continue
-                    ev = self.evaluate(candidate)
-                    if ev.feasible and ev.cost < current.cost - 1e-6:
-                        current = ev
-                        accepted += 1
-                        where = f"week {t}" if kind in ("DC", "RM") else "(whole horizon)"
-                        self.record(round_no, "improve", f"{move}: {kind} {name} {where}",
-                                    f"pass {pass_no}, step fraction {fraction:.3f}", ev)
+            for level in range(n_levels):
+                blocks = []
+                for kind, name, weeks in items:
+                    sizes = self.block_sizes(len(weeks))
+                    if level < len(sizes):
+                        blocks += [(kind, name, block) for block in self.week_blocks(weeks, sizes[level])]
+                if level == 0:                   # the scalar levels belong to the coarsest level
+                    blocks += [("DC cap", p.name, [0]) for p in model.products]
+                    blocks += [("RM floor", m.name, [0]) for m in model.materials]
+                for i in self.rng.permutation(len(blocks)):
+                    kind, name, block = blocks[i]
+                    for move in moves[kind]:
+                        candidate = self.moved_block(current.schedule, kind, name, block, move, fraction)
+                        if candidate is None:
+                            continue
+                        ev = self.evaluate(candidate)
+                        if not (ev.feasible and ev.cost < current.cost - 1e-6):
+                            continue
+                        repeats = 0
+                        while True:                  # accepted: keep going in this direction
+                            current = ev
+                            accepted += 1
+                            where = (f"weeks {block[0]}-{block[-1]}" if kind in ("DC", "RM")
+                                     else "(whole horizon)")
+                            self.record(round_no, "improve", f"{move}: {kind} {name} {where}",
+                                        f"pass {pass_no}, step fraction {fraction:.3f}", ev)
+                            repeats += 1
+                            if repeats > st.max_move_repeats:
+                                break
+                            candidate = self.moved_block(current.schedule, kind, name, block, move, fraction)
+                            if candidate is None:
+                                break
+                            ev = self.evaluate(candidate)
+                            if not (ev.feasible and ev.cost < current.cost - 1e-6):
+                                break
                         break
             self.say(f"    improve pass {pass_no}: {accepted:3d} moves accepted, "
                      f"mean cost {cost_before:,.0f} -> {current.cost:,.0f} (step fraction {fraction:.3f})")
@@ -305,16 +422,36 @@ class Searcher:
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
+    def choose_start(self) -> tuple[PolicySchedule, Evaluation, str]:
+        """Multi-start: repair every start schedule and keep the best one - fewest cells
+        declared unfixable, then feasible before infeasible, then the lowest mean cost.
+        Each start is repaired with a clean list of unfixable cells; the winner's list is kept."""
+        if self.start_schedule is not None:
+            starts = [("warm start (previous review, shifted)", self.start_schedule.copy())]
+        else:
+            starts = start_schedules(self.model, self.settings)
+        best = None
+        for label, schedule in starts:
+            self.unfixable = set()
+            ev = self.evaluate(schedule.copy())
+            self.record(0, "start", label, "", ev)
+            self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
+            if len(starts) > 1:
+                ev = self.repair(ev.schedule, 0)
+                self.say(f"    repaired: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
+                         f"unfixable cells {len(self.unfixable)}")
+            key = (len(self.unfixable), not ev.feasible, ev.cost)
+            if best is None or key < best[0]:
+                best = (key, ev, set(self.unfixable), label)
+        _, ev, self.unfixable, label = best
+        if len(starts) > 1:
+            self.say(f"  chosen start: {label}")
+        return starts[0][1], ev, label
+
     def run(self) -> OptimisationOutcome:
         st = self.settings
-        if self.start_schedule is not None:
-            start, label = self.start_schedule.copy(), "warm start (previous review, shifted)"
-        else:
-            start, label = initial_schedule(self.model, st), "quantile-based start schedule"
-        schedule = start.copy()
-        ev = self.evaluate(schedule)
-        self.record(0, "start", label, "", ev)
-        self.say(f"  start schedule: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
+        start, ev, label = self.choose_start()
+        schedule = ev.schedule
 
         holdout_rounds, hold_cells = [], None
         for round_no in range(1, st.max_outer_rounds + 1):
@@ -340,4 +477,4 @@ class Searcher:
                 self.say("    max rounds reached - margins were raised but not searched again")
 
         return OptimisationOutcome(start, schedule, self.margins, self.unfixable, self.log,
-                                   holdout_rounds, ev, hold_cells, self.n_evaluations)
+                                   holdout_rounds, ev, hold_cells, self.n_evaluations, label)
