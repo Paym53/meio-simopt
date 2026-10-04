@@ -293,6 +293,7 @@ class SearchSettings:
     race_levels: int = 2               # multi-start: coarse block levels of the racing pass per start (0 = no racing)
     confirm_seed_factor: float = 2.0   # confirmation seeds = factor x search seeds (0 = no confirmation)
     restructure_shares: tuple = (0.5, 1.0)  # restructure: RM support as share of the extra lot need (() = off)
+    restructure_tolerance: float = 0.05  # restructure: improve a repaired jump if its cost is within this share
     n_workers: int = 0                 # parallel worker processes of the search (0 = automatic, 1 = none)
 
 

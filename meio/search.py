@@ -584,9 +584,9 @@ class Searcher:
         holds enough raw material for it; every small step on the way is dearer or cuts
         releases. So, per product and price break above its current typical lot: set every
         DC lot to the break (cap included), raise the RMW levels that feed the releases by
-        a share of the extra need, repair, run one coarse improve pass, and keep the result
-        only if it is feasible, cheaper and confirmed; after an accepted jump one fine
-        improve pass follows. Without price breaks: no change."""
+        a share of the extra need and repair. A jump whose repaired cost is within
+        restructure_tolerance of the current cost gets one finer improve pass; it is kept only
+        if it is then feasible, cheaper and confirmed. Without price breaks: no change."""
         st, model = self.settings, self.model
         if not current.feasible or st.restructure_shares == ():
             return current
@@ -612,8 +612,9 @@ class Searcher:
                     unfixable_before = set(self.unfixable)
                     ev = self.repair(candidate, round_no, give_up_above=len(unfixable_before))
                     label = f"lot {lot} for {p.name} with {share:.0%} RM support"
-                    if ev.feasible and len(self.unfixable) == len(unfixable_before):
-                        ev = self.improve(ev, round_no, n_levels=st.race_levels, n_passes=1,
+                    promising = ev.cost < best.cost * (1 + st.restructure_tolerance)
+                    if ev.feasible and len(self.unfixable) == len(unfixable_before) and promising:
+                        ev = self.improve(ev, round_no, n_passes=1, fraction=st.step_fraction / 2,
                                           phase="restructure trial")
                     if (ev.feasible and len(self.unfixable) == len(unfixable_before)
                             and ev.cost < best.cost - 1e-6 and self.no_new_weak_cells(best, ev)):
@@ -623,8 +624,6 @@ class Searcher:
                     else:
                         self.unfixable = unfixable_before
                         self.record(round_no, "restructure", label, "rejected", ev)
-        if best is not current:                   # fine-tune the new lot structure once
-            best = self.improve(best, round_no, n_passes=1, fraction=st.step_fraction / 2)
         return best
 
     def no_new_weak_cells(self, before: Evaluation, after: Evaluation) -> bool:
