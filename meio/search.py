@@ -34,6 +34,9 @@ economically first; single-week moves then fine-tune.
 """
 from __future__ import annotations
 
+import multiprocessing
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -45,6 +48,29 @@ from .policy import (PolicySchedule, dc_order_weeks, feeding_release_weeks, pric
                      start_schedules)
 from .scenarios import ScenarioSet, build_scenarios
 from .simulation import SimResult, simulate
+
+
+# ---------------------------------------------------------------------------
+# Parallel evaluation of candidate moves (a speed-up only: results are identical)
+# ---------------------------------------------------------------------------
+_WORKER: dict = {}
+
+
+def _init_worker(model: ModelInput, seeds: ScenarioSet) -> None:
+    """Runs once in every worker process: keep the model and the search seeds there."""
+    _WORKER["model"], _WORKER["seeds"] = model, seeds
+
+
+def _simulate_cells(schedule: PolicySchedule, z: float, margins: dict):
+    """Worker task: mean cost and cell table (search rule applied) of one schedule."""
+    model = _WORKER["model"]
+    result = simulate(model, schedule, _WORKER["seeds"], report_details=False)
+    return result.mean_total_cost(), service.apply_search_rule(service.cell_table(model, result), z, margins)
+
+
+def default_workers() -> int:
+    """Worker processes for the search: one core stays free, at most 4 (0/1 = sequential)."""
+    return max(1, min(4, (os.cpu_count() or 1) - 1))
 
 
 @dataclass
@@ -88,6 +114,7 @@ class Searcher:
         self.n_evaluations = 0
         self.rng = np.random.default_rng(settings.base_seed + 7)
         self.start_schedule = start_schedule      # warm start (e.g. last week's result), else quantile start
+        self.pool = None                          # worker processes while run() is active
         # confirmation seeds: an independent set that only accepted moves are simulated on
         n_confirm = int(round(settings.confirm_seed_factor * settings.n_search_seeds))
         self.confirm_seeds = (build_scenarios(model, n_confirm, settings.base_seed + 4, "confirm")
@@ -114,13 +141,46 @@ class Searcher:
         result = simulate(self.model, schedule, self.search_seeds, report_details=False)
         cells = service.apply_search_rule(service.cell_table(self.model, result),
                                           self.settings.z, self.margins)
+        return self.judge(schedule, result.mean_total_cost(), cells, result)
+
+    def evaluate_many(self, schedules: list[PolicySchedule]) -> list[Evaluation]:
+        """Evaluate several candidates, in parallel worker processes if there are any.
+        The simulations are deterministic, so the evaluations are identical either way
+        (they only lack the SimResult, which the improve phase does not need)."""
+        if self.pool is None or len(schedules) < 2:
+            return [self.evaluate(schedule) for schedule in schedules]
+        self.n_evaluations += len(schedules)
+        tasks = [(schedule, self.settings.z, self.margins) for schedule in schedules]
+        return [self.judge(schedule, cost, cells)
+                for schedule, (cost, cells) in zip(schedules, self.pool.starmap(_simulate_cells, tasks))]
+
+    @contextmanager
+    def workers(self):
+        """Worker processes for evaluate_many during the search (none if n_workers <= 1)."""
+        n = self.settings.n_workers if self.settings.n_workers > 0 else default_workers()
+        if n <= 1:
+            yield
+            return
+        # "spawn" works the same on Windows, macOS and Linux and is safe inside the API's threads
+        pool = multiprocessing.get_context("spawn").Pool(n, initializer=_init_worker,
+                                                         initargs=(self.model, self.search_seeds))
+        self.pool = pool
+        try:
+            yield
+        finally:
+            self.pool = None
+            pool.terminate()
+            pool.join()
+
+    def judge(self, schedule: PolicySchedule, cost: float, cells: pd.DataFrame, result=None) -> Evaluation:
+        """Feasibility of an evaluated schedule (see evaluate)."""
         keys = list(zip(cells["product"], cells["channel"], cells["week"]))
         bound = cells["search_lower_bound"].to_numpy()
         unfixable = np.array([k in self.unfixable for k in keys])
         kept = np.array([np.isnan(b) or b >= self.unfixable_floor.get(k, -np.inf) - 1e-9
                          for k, b in zip(keys, bound)])
         failing = int((~cells["search_feasible"].to_numpy() & ~unfixable).sum() + (unfixable & ~kept).sum())
-        return Evaluation(schedule, result, cells, result.mean_total_cost(), failing == 0, failing)
+        return Evaluation(schedule, result, cells, cost, failing == 0, failing)
 
     def confirmation(self, schedule: PolicySchedule) -> tuple[set, dict]:
         """Cells that are weak on the confirmation seeds - mean fill below target, the hold-out
@@ -472,13 +532,17 @@ class Searcher:
                     blocks += [("RM floor", m.name, [0]) for m in model.materials]
                 for i in self.rng.permutation(len(blocks)):
                     kind, name, block = blocks[i]
-                    for move in moves[kind]:
-                        if productive is not None and (kind, level, move) not in productive:
-                            continue
-                        candidate = self.moved_block(current.schedule, kind, name, block, move, fraction)
-                        if candidate is None:
-                            continue
-                        ev = self.evaluate(candidate)
+                    tried = [(move, self.moved_block(current.schedule, kind, name, block, move, fraction))
+                             for move in moves[kind]
+                             if productive is None or (kind, level, move) in productive]
+                    tried = [(move, candidate) for move, candidate in tried if candidate is not None]
+                    if self.pool is not None:            # all moves of the block at once ...
+                        evaluated = self.evaluate_many([candidate for _, candidate in tried])
+                    else:                                # ... or one after the other, lazily
+                        evaluated = None
+                    for j, (move, candidate) in enumerate(tried):
+                        ev = evaluated[j] if evaluated is not None else self.evaluate(candidate)
+                        # the first move in the fixed order that pays off wins (same choice either way)
                         if not (ev.feasible and ev.cost < current.cost - 1e-6 and self.confirmed(candidate)):
                             continue
                         hits.add((kind, level, move))
@@ -614,6 +678,10 @@ class Searcher:
         return starts[0][1], ev, label
 
     def run(self) -> OptimisationOutcome:
+        with self.workers():
+            return self._run()
+
+    def _run(self) -> OptimisationOutcome:
         st = self.settings
         start, ev, label = self.choose_start()
         schedule = ev.schedule

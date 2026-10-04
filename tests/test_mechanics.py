@@ -991,3 +991,24 @@ def test_confirmation_seeds_reject_a_move_that_makes_a_cell_weak():
     from meio.search import Searcher
     plain = Searcher(s.model, s.settings, s.search_seeds, s.holdout_seeds, verbose=False)
     assert plain.confirm_seeds is None and plain.confirmed(starved)   # switched off: no check
+
+
+def test_parallel_search_gives_exactly_the_sequential_result():
+    """Speed-ups never change results: candidate moves evaluated in worker processes lead
+    to the same schedule, the same accepted moves and the same cost as one after the other."""
+    outcomes = []
+    for workers in (1, 2):
+        s = _searcher(build_example_input(horizon=16), n=30)
+        s.settings.max_improve_passes = 1
+        s.settings.max_outer_rounds = 1
+        s.settings.n_workers = workers
+        outcomes.append(s.run())
+    seq, par = outcomes
+    assert par.last_search_eval.cost == seq.last_search_eval.cost
+    for field_name in ("dc_s", "dc_S", "rm_s", "rm_S"):
+        a, b = getattr(seq.schedule, field_name), getattr(par.schedule, field_name)
+        assert all(np.array_equal(a[k], b[k]) for k in a)
+    assert seq.schedule.dc_cap == par.schedule.dc_cap and seq.schedule.rm_floor == par.schedule.rm_floor
+    accepted = lambda out: [(r["phase"], r["action"], r["mean_cost"]) for r in out.search_log
+                            if r["phase"] in ("improve", "race", "restructure")]
+    assert accepted(seq) == accepted(par)
