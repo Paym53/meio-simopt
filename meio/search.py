@@ -15,8 +15,11 @@ Simulation-optimisation of the (s, S) schedule (spec v5, Section 12.3).
                      types: lower s and S (less safety stock), lower / raise S (smaller /
                      larger lots), and a coordinated echelon move that changes the DC
                      lot together with the RMW levels that feed those releases. A move
-                     is kept only if the mean cost falls and the schedule stays feasible
-                     on the search seeds; an accepted move is repeated in the same
+                     is kept only if the mean cost falls, the schedule stays feasible on
+                     the search seeds and - on an independent set of confirmation seeds -
+                     no cell fails that did not fail before (guards against the
+                     optimizer's curse: among many candidates, some look feasible on the
+                     search seeds by chance). An accepted move is repeated in the same
                      direction while it keeps paying off.
         C. HOLD-OUT: simulate the hold-out seeds, raise the margin of weak cells
     until the hold-out check finds no weak cell (or max rounds)
@@ -36,7 +39,7 @@ import pandas as pd
 from . import service
 from .config import ModelInput, SearchSettings
 from .policy import PolicySchedule, dc_order_weeks, feeding_release_weeks, rm_order_weeks, start_schedules
-from .scenarios import ScenarioSet
+from .scenarios import ScenarioSet, build_scenarios
 from .simulation import SimResult, simulate
 
 
@@ -81,6 +84,12 @@ class Searcher:
         self.n_evaluations = 0
         self.rng = np.random.default_rng(settings.base_seed + 7)
         self.start_schedule = start_schedule      # warm start (e.g. last week's result), else quantile start
+        # confirmation seeds: an independent set that only accepted moves are simulated on
+        n_confirm = int(round(settings.confirm_seed_factor * settings.n_search_seeds))
+        self.confirm_seeds = (build_scenarios(model, n_confirm, settings.base_seed + 4, "confirm")
+                              if n_confirm > 0 else None)
+        self.confirm_failing: set = set()    # cells failing on the confirmation seeds (current schedule)
+        self.confirm_floor: dict = {}        # unfixable cell -> lower bound on the confirmation seeds
 
     # ------------------------------------------------------------------
     def say(self, text: str) -> None:
@@ -109,6 +118,37 @@ class Searcher:
         failing = int((~cells["search_feasible"].to_numpy() & ~unfixable).sum() + (unfixable & ~kept).sum())
         return Evaluation(schedule, result, cells, result.mean_total_cost(), failing == 0, failing)
 
+    def confirmation(self, schedule: PolicySchedule) -> tuple[set, dict]:
+        """Cells failing the search rule on the confirmation seeds (unfixable cells: those below
+        their confirmation floor) and the lower bounds of the unfixable cells there."""
+        self.n_evaluations += 1
+        result = simulate(self.model, schedule, self.confirm_seeds, report_details=False)
+        cells = service.apply_search_rule(service.cell_table(self.model, result), self.settings.z, self.margins)
+        failing, bounds = set(), {}
+        for p, c, w, ok, b in zip(cells["product"], cells["channel"], cells["week"],
+                                  cells["search_feasible"], cells["search_lower_bound"]):
+            key = (p, c, int(w))
+            if key in self.unfixable:
+                if not np.isnan(b):
+                    bounds[key] = float(b)
+                    if b < self.confirm_floor.get(key, -np.inf) - 1e-9:
+                        failing.add(key)
+            elif not ok:
+                failing.add(key)
+        return failing, bounds
+
+    def confirmed(self, schedule: PolicySchedule) -> bool:
+        """Optimizer's-curse check of a move the search seeds accepted: on the independent
+        confirmation seeds no cell may fail that did not fail before the move (the same
+        "no cell worse" rule as the week-1 lookahead). Without confirmation seeds: True."""
+        if self.confirm_seeds is None:
+            return True
+        failing, _ = self.confirmation(schedule)
+        if failing <= self.confirm_failing:
+            self.confirm_failing = failing
+            return True
+        return False
+
     def service_floors(self, ev: Evaluation) -> dict:
         """Search lower bound of every unfixable cell in `ev` (cells without demand: no floor)."""
         floors = {}
@@ -118,12 +158,12 @@ class Searcher:
                 floors[k] = float(b)
         return floors
 
-    def unfixable_shortfall(self, ev: Evaluation) -> float:
-        """Total gap to target of the unfixable cells in `ev` (compares starts on service)."""
+    @staticmethod
+    def service_gap(ev: Evaluation) -> float:
+        """Total gap to target over all cells, sum of max(0, F - search lower bound):
+        0 when every cell passes. Compares starts on service before cost."""
         cells = ev.cells
-        gap = (cells["target_F"] - cells["search_lower_bound"]).clip(lower=0).fillna(0)
-        keys = list(zip(cells["product"], cells["channel"], cells["week"]))
-        return float(sum(g for k, g in zip(keys, gap) if k in self.unfixable))
+        return float((cells["target_F"] - cells["search_lower_bound"]).clip(lower=0).fillna(0).sum())
 
     # ------------------------------------------------------------------
     # Step sizes and moves
@@ -351,7 +391,7 @@ class Searcher:
             key = (cell["product"], cell["channel"], int(cell["week"]))
 
             best, stuck = progress.get(key, (-np.inf, 0))
-            if cell["search_lower_bound"] > best + 1e-4:
+            if cell["search_lower_bound"] > best + st.repair_min_progress:
                 progress[key] = (cell["search_lower_bound"], 0)
                 checkpoint[key] = schedule.copy()
             else:
@@ -404,6 +444,9 @@ class Searcher:
         n_levels = min(n_levels or all_levels, all_levels)
         fraction = fraction or st.step_fraction
         self.unfixable_floor = self.service_floors(current)     # unfixable cells: never worse
+        if self.confirm_seeds is not None:                      # ... on the confirmation seeds too
+            self.confirm_floor = {}
+            self.confirm_failing, self.confirm_floor = self.confirmation(current.schedule)
         productive = None                     # (kind, level, move) that found something last pass
 
         for pass_no in range(1, (n_passes or st.max_improve_passes) + 1):
@@ -428,7 +471,7 @@ class Searcher:
                         if candidate is None:
                             continue
                         ev = self.evaluate(candidate)
-                        if not (ev.feasible and ev.cost < current.cost - 1e-6):
+                        if not (ev.feasible and ev.cost < current.cost - 1e-6 and self.confirmed(candidate)):
                             continue
                         hits.add((kind, level, move))
                         repeats = 0
@@ -446,7 +489,7 @@ class Searcher:
                             if candidate is None:
                                 break
                             ev = self.evaluate(candidate)
-                            if not (ev.feasible and ev.cost < current.cost - 1e-6):
+                            if not (ev.feasible and ev.cost < current.cost - 1e-6 and self.confirmed(candidate)):
                                 break
                         break
             self.say(f"    improve pass {pass_no}: {accepted:3d} moves accepted, "
@@ -455,7 +498,7 @@ class Searcher:
             fraction /= 2                        # finer steps in the next pass
             if fraction < st.min_step_fraction:
                 break
-        self.unfixable_floor = {}
+        self.unfixable_floor, self.confirm_floor = {}, {}
         return current
 
     # ------------------------------------------------------------------
@@ -463,9 +506,9 @@ class Searcher:
     # ------------------------------------------------------------------
     def choose_start(self) -> tuple[PolicySchedule, Evaluation, str]:
         """Multi-start: repair every start schedule, give each feasible one a coarse racing
-        pass (whole-horizon and half-horizon blocks) and keep the best one - fewest cells
-        declared unfixable, then feasible before infeasible, then the smallest service gap
-        on unfixable cells, then the lowest mean cost.
+        pass (whole-horizon and half-horizon blocks) and keep the best one: the smallest total
+        service gap over all cells (sum of F - lower bound where below target; differences
+        under 0.01 count as equal), then the lowest mean cost.
         The classic start is repaired first; the cells it cannot fix (structural: freshness
         or lead times) are known to the later starts, which therefore do not spend repair
         steps on them again."""
@@ -481,14 +524,14 @@ class Searcher:
             self.record(0, "start", label, "", ev)
             self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
             if len(starts) > 1:
-                ev = self.repair(ev.schedule, 0, give_up_above=best[0][0] if best else np.inf)
+                ev = self.repair(ev.schedule, 0, give_up_above=len(best[2]) if best else np.inf)
                 self.say(f"    repaired: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
                          f"unfixable cells {len(self.unfixable)}")
-                if st.race_levels > 0 and ev.feasible and (best is None or len(self.unfixable) <= best[0][0]):
+                if st.race_levels > 0 and ev.feasible and (best is None or len(self.unfixable) <= len(best[2])):
                     # racing: one coarse pass (whole horizon and halves) before comparing,
                     # because the cost right after repair says little about where a start leads
                     ev = self.improve(ev, 0, n_levels=self.settings.race_levels, n_passes=1)
-            key = (len(self.unfixable), not ev.feasible, round(self.unfixable_shortfall(ev), 3), ev.cost)
+            key = (round(self.service_gap(ev), 2), ev.cost)
             if best is None or key < best[0]:
                 best = (key, ev, set(self.unfixable), label)
             known_unfixable |= self.unfixable

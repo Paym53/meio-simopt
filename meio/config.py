@@ -275,6 +275,7 @@ class SearchSettings:
     max_outer_rounds: int = 3        # repair -> improve -> hold-out check rounds
     max_repair_steps: int = 300
     repair_patience: int = 8         # steps without progress before a cell is declared unfixable
+    repair_min_progress: float = 0.001  # a repair step is progress if the cell's lower bound rises by this
     max_improve_passes: int = 4
     step_fraction: float = 0.10      # step size as fraction of the level (at least one batch)
     min_step_fraction: float = 0.02
@@ -290,6 +291,7 @@ class SearchSettings:
     max_starts: int = 5                # multi-start: quantile, economic-lot and price-break starts (policy.start_schedules)
     max_move_repeats: int = 8          # improve: repeat an accepted move in the same direction up to this often
     race_levels: int = 2               # multi-start: coarse block levels of the racing pass per start (0 = no racing)
+    confirm_seed_factor: float = 2.0   # confirmation seeds = factor x search seeds (0 = no confirmation)
 
 
 PRESETS = {
