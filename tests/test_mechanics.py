@@ -792,3 +792,214 @@ def test_fractional_bom_in_json_and_validation():
             assert "BOM quantity of RM_A" in str(exc)
         else:
             raise AssertionError(f"BOM quantity {bad} was accepted")
+
+
+# ---------------------------------------------------------------------------
+# Price-break round-up of the DC order (all-units discounts)
+# ---------------------------------------------------------------------------
+def _tier_product(**changes):
+    from dataclasses import replace
+    fg = Product("F", shelf_life=24, channels=[Channel("Only", 1, 0.9)], bom={"A": 1}, batch_size=100,
+                 moq=5000, holding_cost=0.2, waste_cost=0.5, fixed_cost_per_release=250,
+                 production_tiers=[Tier(5000, 10000, 1.3), Tier(10001, 15000, 0.9), Tier(15001, 10**9, 0.6)],
+                 transport_tiers=[Tier(0, 3000, 0.8), Tier(3001, 10000, 0.6), Tier(10001, 10**9, 0.4)],
+                 lead_time_dist={6: 1.0})
+    return replace(fg, **changes)
+
+
+def test_order_is_rounded_up_to_a_price_break_only_when_that_is_cheaper_in_total():
+    from meio.simulation import price_break_quantities, round_up_to_price_break, variable_release_cost
+    p = _tier_product()
+    assert price_break_quantities(p) == [3100, 10100, 15100]
+    q = np.array([0, 5000, 6900, 7000, 9900, 10100, 11600, 11700, 15100, 20000])
+    out = round_up_to_price_break(q, p, cap=30000)
+    # 5000 / 6900 x 1.90 <= 10100 x 1.30 = 13,130 -> keep; 7000 x 1.90 = 13,300 -> 10100;
+    # 11600 x 1.30 = 15,080 < 15,100 -> keep; 11700 x 1.30 = 15,210 -> 15100
+    assert list(out) == [0, 5000, 6900, 10100, 10100, 10100, 11600, 15100, 15100, 20000]
+    assert (variable_release_cost(out, p) <= variable_release_cost(q, p)).all()   # never dearer
+    assert (out >= q).all()                                                         # never smaller
+    # the order cap is respected: no break above it
+    assert list(round_up_to_price_break(np.array([9900, 14000]), p, cap=12000)) == [10100, 14000]
+    # without discount bands nothing changes
+    flat = _tier_product(production_tiers=[Tier(0, 10**9, 1.0)], transport_tiers=[Tier(0, 10**9, 0.5)])
+    assert list(round_up_to_price_break(q, flat, cap=30000)) == list(q)
+
+
+def test_dc_order_in_the_simulation_uses_the_price_break_round_up():
+    """A steep discount at 300 units (3.00 -> 1.00, transport 0.50): an order of Q < 300 costs
+    3.50 Q, 300 units cost 450, so every order above 128 units is raised to 300 as long as the
+    cap allows it (batch 20: from 140 on); smaller orders stay."""
+    from dataclasses import replace
+    model = build_example_input()
+    p = replace(model.products[0], production_tiers=[Tier(0, 299, 3.0), Tier(300, 10**9, 1.0)],
+                transport_tiers=[Tier(0, 10**9, 0.5)])
+    model = replace(model, products=[p])
+    schedule = initial_schedule(model, SearchSettings(n_quantile_samples=300))
+    seeds = build_scenarios(model, 50, 4, "t")
+    for cap, expect_rounding in ((1000, True), (280, False)):
+        schedule.dc_cap["FG1"] = cap
+        dc = simulate(model, schedule, seeds, report_details=False).dc["FG1"]
+        Q = dc["ordered_Q"][:, 1:]
+        if expect_rounding:
+            assert (Q == 300).any()
+            assert not ((Q >= 140) & (Q < 300)).any()    # always cheaper to order 300
+        else:
+            assert not (Q == 300).any()                    # break above the cap: no round-up
+        assert (dc["released_P"][:, 1:] <= Q).all()
+
+
+# ---------------------------------------------------------------------------
+# Search: start schedules, block moves, guard for unfixable cells
+# ---------------------------------------------------------------------------
+def test_start_schedules_contain_the_classic_start_and_price_break_lots():
+    from meio.io_json import load_model
+    from meio.policy import economic_cover_weeks, price_break_lots, start_schedules
+    settings = SearchSettings(n_quantile_samples=500)
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "example_input.json")
+    model = load_model(path)
+    starts = start_schedules(model, settings)
+    classic = initial_schedule(model, settings)
+    label, first = starts[0]
+    assert label == "quantile start"
+    assert all(np.array_equal(first.dc_S[k], classic.dc_S[k]) for k in classic.dc_S)
+    assert all(np.array_equal(first.rm_s[k], classic.rm_s[k]) for k in classic.rm_s)
+    lots = price_break_lots(model, model.products[0])
+    assert lots == [10100, 15100]                      # the MOQ itself is no price break
+    for lot in lots:
+        sched = dict(starts)[f"price-break start FG1 lot {lot}"]
+        weeks = sched.dc_s["FG1"] > 0
+        assert ((sched.dc_S["FG1"] - sched.dc_s["FG1"])[weeks] >= lot).all()
+        assert sched.dc_cap["FG1"] >= lot                # the cap does not cut the lot
+    dc_cover, rm_cover = economic_cover_weeks(model)
+    strictest = min(model.products[0].max_age_for_channel(c) for c in model.products[0].channels)
+    assert 1 <= dc_cover["FG1"] <= strictest - 1          # a lot sells before it is too old
+    assert all(c >= 1 for c in rm_cover.values())
+
+
+def _searcher(model=None, n=60):
+    from meio.search import Searcher
+    model = model or build_example_input()
+    settings = SearchSettings(n_search_seeds=n, n_holdout_seeds=n, n_quantile_samples=300)
+    return Searcher(model, settings, build_scenarios(model, n, 1, "s"), build_scenarios(model, n, 2, "h"),
+                    verbose=False)
+
+
+def test_block_moves_change_exactly_the_block_and_lift_the_cap():
+    s = _searcher()
+    sched = initial_schedule(s.model, s.settings)
+    weeks = [3, 4, 5, 6]
+    new = s.moved_block(sched, "DC", "FG1", weeks, "raise S (larger orders)", 0.10)
+    diff = new.dc_S["FG1"] - sched.dc_S["FG1"]
+    step = diff[3]
+    assert step > 0 and step % 20 == 0 and (diff[weeks] == step).all()
+    assert (np.delete(diff, weeks) == 0).all() and np.array_equal(new.dc_s["FG1"], sched.dc_s["FG1"])
+    assert new.dc_cap["FG1"] >= int((new.dc_S["FG1"] - new.dc_s["FG1"]).max())
+    lowered = s.moved_block(sched, "DC", "FG1", weeks, "lower s and S", 0.10)
+    assert ((sched.dc_s["FG1"] - lowered.dc_s["FG1"])[weeks] > 0).all()
+    assert s.moved_block(sched, "DC", "FG1", weeks, "lower s and S", 100.0) is None   # below zero
+
+
+def test_coordinated_lot_move_carries_the_rmw_levels_that_feed_the_releases():
+    s = _searcher()
+    sched = initial_schedule(s.model, s.settings)
+    weeks = [10, 11, 12]
+    new = s.moved_block(sched, "DC", "FG1", weeks, "raise lot with RM support", 0.10)
+    step = int(new.dc_S["FG1"][10] - sched.dc_S["FG1"][10])
+    feeding = s.rm_weeks_feeding("FG1", weeks)
+    for m in s.model.materials:
+        rw = feeding[m.name]
+        assert rw, "every material has order weeks that feed weeks 10-12"
+        d_s = new.rm_s[m.name] - sched.rm_s[m.name]
+        d_S = new.rm_S[m.name] - sched.rm_S[m.name]
+        expect = int(np.ceil(s.model.products[0].bom[m.name] * step))
+        assert (d_s[rw] == expect).all() and (d_S[rw] == expect).all()
+        assert (np.delete(d_s, rw) == 0).all()
+        # an RM order week feeds a release only if its delivery can arrive by then
+        assert all(any(r - m.lead_time_max <= o <= r - m.lead_time_min for r in weeks) for o in rw)
+    back = s.moved_block(new, "DC", "FG1", weeks, "lower lot with RM support", 0.10)
+    assert back is not None
+
+
+def test_block_sizes_go_from_the_whole_horizon_down_to_single_weeks():
+    from meio.search import Searcher
+    assert Searcher.block_sizes(16) == [16, 8, 4, 2, 1]
+    assert Searcher.block_sizes(5) == [5, 3, 2, 1]
+    assert Searcher.block_sizes(1) == [1]
+    assert Searcher.week_blocks([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]
+
+
+def test_improve_never_lowers_the_service_of_unfixable_cells():
+    s = _searcher()
+    sched = initial_schedule(s.model, s.settings)
+    ev = s.evaluate(sched)
+    cells = ev.cells
+    key = tuple(cells.iloc[5][["product", "channel", "week"]])
+    key = (key[0], key[1], int(key[2]))
+    s.unfixable = {key}
+    s.unfixable_floor = s.service_floors(ev)
+    assert s.evaluate(sched).n_failing == ev.n_failing - (0 if ev.cells.iloc[5]["search_feasible"] else 1)
+    s.unfixable_floor[key] += 0.5                        # pretend the cell had much better service
+    assert not s.evaluate(sched).feasible                # now the same schedule violates the floor
+    s.unfixable_floor = {}
+
+
+def test_search_keeps_the_best_start_and_never_ends_worse_than_its_repaired_start():
+    s = _searcher(build_example_input(horizon=16), n=30)  # short horizon: a fast full search
+    s.settings.max_improve_passes = 1
+    s.settings.max_outer_rounds = 1
+    out = s.run()
+    start_rows = [r for r in out.search_log if r["phase"] == "start"]
+    assert [r["action"] for r in start_rows][0] == "quantile start"
+    repaired = [r for r in out.search_log if r["round"] == 0 and r["phase"] != "start"]
+    assert out.chosen_start in [r["action"] for r in start_rows]
+    improve = [r for r in out.search_log if r["phase"] == "improve" and r["round"] == 1]
+    costs = [r["mean_cost"] for r in improve]
+    assert costs == sorted(costs, reverse=True)          # every accepted move lowers the cost
+    assert all(r["feasible"] for r in out.search_log if r["phase"] == "improve")
+    chosen_rows = [r for r in start_rows if r["action"] == out.chosen_start]
+    assert len(chosen_rows) == 1
+    # the reported baseline is always the simple heuristic (s,S): the classic quantile start
+    classic = initial_schedule(s.model, s.settings)
+    for name in ("dc_s", "dc_S", "rm_s", "rm_S"):
+        a, b = getattr(out.start_schedule, name), getattr(classic, name)
+        assert all(np.array_equal(a[k], b[k]) for k in a)
+    assert out.start_schedule.dc_cap == classic.dc_cap and out.start_schedule.rm_floor == classic.rm_floor
+
+
+def test_confirmation_seeds_reject_a_move_that_makes_a_cell_weak():
+    s = _searcher()
+    assert s.confirm_seeds is not None and s.confirm_seeds.n_seeds == 2 * s.settings.n_search_seeds
+    sched = initial_schedule(s.model, s.settings)
+    s.confirm_failing, s.confirm_floor = s.confirmation(sched)
+    assert s.confirmed(sched)                            # the same schedule: nothing new is weak
+    starved = sched.copy()
+    starved.dc_s["FG1"][5:] = 0                          # no more orders from week 5 on
+    starved.dc_S["FG1"][5:] = 20
+    weak_before = set(s.confirm_failing)
+    assert not s.confirmed(starved)                      # new weak cells on the confirmation seeds
+    assert s.confirm_failing == weak_before              # a rejected move changes nothing
+    s.settings.confirm_seed_factor = 0
+    from meio.search import Searcher
+    plain = Searcher(s.model, s.settings, s.search_seeds, s.holdout_seeds, verbose=False)
+    assert plain.confirm_seeds is None and plain.confirmed(starved)   # switched off: no check
+
+
+def test_parallel_search_gives_exactly_the_sequential_result():
+    """Speed-ups never change results: candidate moves evaluated in worker processes lead
+    to the same schedule, the same accepted moves and the same cost as one after the other."""
+    outcomes = []
+    for workers in (1, 2):
+        s = _searcher(build_example_input(horizon=16), n=30)
+        s.settings.max_improve_passes = 1
+        s.settings.max_outer_rounds = 1
+        s.settings.n_workers = workers
+        outcomes.append(s.run())
+    seq, par = outcomes
+    assert par.last_search_eval.cost == seq.last_search_eval.cost
+    for field_name in ("dc_s", "dc_S", "rm_s", "rm_S"):
+        a, b = getattr(seq.schedule, field_name), getattr(par.schedule, field_name)
+        assert all(np.array_equal(a[k], b[k]) for k in a)
+    assert seq.schedule.dc_cap == par.schedule.dc_cap and seq.schedule.rm_floor == par.schedule.rm_floor
+    accepted = lambda out: [(r["phase"], r["action"], r["mean_cost"]) for r in out.search_log
+                            if r["phase"] in ("improve", "race", "restructure")]
+    assert accepted(seq) == accepted(par)

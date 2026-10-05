@@ -14,7 +14,7 @@ Simulation-optimisation model for a perishable two-echelon supply chain: supplie
 ## Commands
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                         # must pass before every commit (89+ tests)
+python -m pytest -q                         # must pass before every commit (100+ tests)
 python main.py --preset quick               # end-to-end check, ~1-2 min, writes output/run_*/
 python main.py --input examples/example_input.json --preset quick
 python api.py                               # web API on http://localhost:8000/docs (tests: tests/test_api.py)
@@ -38,6 +38,8 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 - **Cut releases** still respect batch size and MOQ (round down; below the MOQ nothing is released).
 - **BOM quantities** may be fractional (e.g. 0.2). RM shipped for a release = quantity × P rounded **up** to whole units, in exact integer arithmetic (`config.rm_units_for`, `config.max_fg_from`); whole-number BOMs give exactly the old results.
 - **Lookahead.** A candidate may not fail any cell the rule's own quantity passes; among those, the cheapest wins.
+- **Price-break round-up.** The DC order is raised to a price-break quantity (never above the cap) when that is cheaper in total (all-units production + transport tiers); `simulation.round_up_to_price_break`.
+- **Search** (`meio/search.py`, `docs/search_algorithm.md`): multi-start, coarse-to-fine block moves, restructure jumps, confirmation seeds (an accepted move may not make a cell weak there), unfixable cells may not get worse within an improve phase. Parallel evaluation (`n_workers`) must give results identical to sequential (`test_parallel_search_gives_exactly_the_sequential_result`).
 - **JSON contract.** `examples/example_input.json` (input; the app's default dataset, maintained by hand: FG1, ~4,000 units/week; the tests and `main.py` without `--input` use the smaller `build_example_input()`) and `summary.json` (output, snake_case keys) are used by a future app. Change them only on purpose, and update `meio/io_json.py`, the examples and `docs/app_integration.md` together.
 
 ## Style
@@ -53,6 +55,6 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 - Deployment settings live in `render.yaml` (not the Render dashboard); `tests/test_deployment.py` keeps it consistent with `api.py` and CI. Never commit API keys.
 
 ## Planned next work
-1. Search algorithm: multi-start (quantile start + further start schedules), fewer parameters, a better optimiser.
+1. Search: fewer parameters (forecast-scaled levels), parallel lookahead.
 2. Several finished goods sharing raw materials; realistic holding costs (unit value × rate + storage).
 3. Lovable frontend on top of the web API (`api.py`, deployed on Render; see `docs/app_integration.md`).

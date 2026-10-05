@@ -16,6 +16,10 @@
 > window, expected-waste windows, the heuristic start levels and the search's repair weeks. With all
 > $\tau_r=0$ the model is exactly the original one.
 
+> **Update (5 Oct 2026): search algorithm v2 and price-break round-up.** Section 12.3 is superseded by
+> `docs/search_algorithm.md` (multi-start, coarse-to-fine block moves, restructure, confirmation seeds).
+> The DC order of step 3a is raised to a price-break quantity (not above the cap) when that is cheaper in total.
+>
 > **Update (2 Oct 2026): fractional BOM quantities.** $a_{f,r}$ may be fractional (e.g. 0.2). A release of
 > $P$ units ships $\lceil a_{f,r}P\rceil$ units of material $r$ (whole units, exact integer arithmetic), and
 > the RM limit of a release is the largest $P$ with $\lceil a_{f,r}P\rceil\le$ usable stock. Whole-number

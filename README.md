@@ -25,9 +25,9 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-python main.py --preset quick      # ~1-2 min, example input
-python main.py                     # preset "standard", ~3 min
-python -m pytest -q                # 89 tests
+python main.py --preset quick      # ~1-3 min, built-in example (uses several CPU cores)
+python main.py                     # preset "standard"
+python -m pytest -q                # 100 tests
 ```
 
 Each run creates a folder `output/run_<timestamp>/` containing:
@@ -70,10 +70,12 @@ Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` 
 
 1. **Seeds.** Three disjoint sets of random futures (search, hold-out, test), each with demand and lead-time draws.
 2. **Tune the rule.** Week-specific s and S at the DC and RMW, plus the order cap and RMW minimums:
-   - start: quantiles of demand over random protection intervals;
+   - **multi-start**: the classic quantile start, an economic-lot start (EOQ cover, bounded by shelf life) and price-break starts; each is repaired and raced with one coarse pass, the best continues;
    - **repair**: raise the levels that feed failing cells;
-   - **improve**: coordinate moves that lower the mean cost while every cell stays feasible;
+   - **improve**: coarse-to-fine pattern search on blocks of weeks (whole horizon → single weeks), incl. a coordinated move of the DC lot with the RMW levels that feed it; every accepted move is double-checked on independent confirmation seeds (optimizer's curse);
+   - **restructure**: large jumps of the lot structure to price breaks with RM support, kept only if cheaper and confirmed;
    - **hold-out check**: raise the safety margin of cells the search over-fitted.
+   Details and benchmark: [`docs/search_algorithm.md`](docs/search_algorithm.md).
 3. **Lookahead.** Choose this week's orders by simulating candidates. The DC order goes first, then each RM order. A candidate may not fail any cell the rule's own quantity passes.
 4. **Final verdict.** Mean fill ≥ F for every (week × channel) cell after L_max, on the untouched test seeds, with no safety margin.
 5. **Baseline.** The heuristic start schedule is simulated on the same test seeds, so the report shows what the optimisation adds (cost and service).
@@ -128,7 +130,7 @@ docs/                      specification, policy choice, app integration plan
 ## Status and roadmap
 
 - ✅ Running model with the age-aware capped (s,S) + lookahead policy, Excel and JSON output, tests and CI.
-- ⏭ Search algorithm: multi-start, parameter reduction, better optimiser. Currently the start point changes results by up to 18 %.
+- ✅ Search algorithm v2: multi-start, coarse-to-fine block moves, coordinated echelon moves, price-break restructuring, confirmation seeds, parallel evaluation (`docs/search_algorithm.md`): −2 to −37 % cost or clearly better service on all eight benchmark instances.
 - ⏭ Several finished goods sharing raw materials; realistic holding costs (value × rate + storage).
 - ✅ Web API (`api.py`) with Render Blueprint (`render.yaml`).
 - ⏭ Lovable frontend: see [`docs/app_integration.md`](docs/app_integration.md).

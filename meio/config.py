@@ -275,6 +275,7 @@ class SearchSettings:
     max_outer_rounds: int = 3        # repair -> improve -> hold-out check rounds
     max_repair_steps: int = 300
     repair_patience: int = 8         # steps without progress before a cell is declared unfixable
+    repair_min_progress: float = 0.001  # a repair step is progress if the cell's lower bound rises by this
     max_improve_passes: int = 4
     step_fraction: float = 0.10      # step size as fraction of the level (at least one batch)
     min_step_fraction: float = 0.02
@@ -287,13 +288,22 @@ class SearchSettings:
     initial_cap_weeks: float = 2.0     # start value of the DC order cap: weeks of mean demand
     initial_floor_share: float = 1.0   # start value of the RMW minimum: share of mean use over the median supplier lead time
     lookahead_rm_steps: int = 4        # lookahead: RM candidates = rule quantity +/- up to this many steps
+    max_starts: int = 5                # multi-start: quantile, economic-lot and price-break starts (policy.start_schedules)
+    max_move_repeats: int = 8          # improve: repeat an accepted move in the same direction up to this often
+    race_levels: int = 2               # multi-start: coarse block levels of the racing pass per start (0 = no racing)
+    confirm_seed_factor: float = 2.0   # confirmation seeds = factor x search seeds (0 = no confirmation)
+    restructure_shares: tuple = (0.5, 1.0)  # restructure: RM support as share of the extra lot need (() = off)
+    restructure_tolerance: float = 0.05  # restructure: improve a repaired jump if its cost is within this share
+    n_workers: int = 0                 # parallel worker processes of the search (0 = automatic, 1 = none)
 
 
 PRESETS = {
-    # name: (search seeds, hold-out seeds, test seeds, improve passes, outer rounds)  ~runtime, 2 CPU cores
-    "quick": (200, 400, 2000, 2, 2),        # ~1-2 min, for trying things out
-    "standard": (300, 600, 5000, 3, 2),     # ~3 min, default
-    "full": (500, 1000, 10000, 4, 3),       # ~5-6 min, for decisions you rely on
+    # name: (search seeds, hold-out seeds, test seeds, improve passes, outer rounds)
+    # The hold-out set is simulated only once per round, so it is large: fill rates per seed
+    # are skewed (mostly 100 %, rare deep shortages) and small samples overestimate them.
+    "quick": (200, 1000, 2000, 2, 2),       # for trying things out
+    "standard": (300, 1500, 5000, 3, 2),    # default
+    "full": (500, 2500, 10000, 4, 3),       # for decisions you rely on
 }
 
 

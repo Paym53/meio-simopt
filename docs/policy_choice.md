@@ -72,6 +72,13 @@ C also has higher realised fill rates: Online 0.998 vs 0.993, Outlet 0.991 vs 0.
 3. **The search start changes results by 7–18 %** (B vs B0), as much as the policy does. Improving the search is the next step, starting with multi-start (several start schedules).
 4. **Configurations 3 and 4 cannot reach Retail's 98 % target with any policy.** Freshness gate and lead times are incompatible.
 
+## 3b. Addition (October 2026): price-break round-up
+
+The DC order of the rule is raised to a price-break quantity (not above the order cap) when that is
+cheaper in total under the all-units production and transport tiers. It has no parameters and
+changes nothing without discount bands. The search was rebuilt at the same time
+(`docs/search_algorithm.md`); conclusion 3 above (start dependence) motivated it.
+
 ## 4. Open points
 - Search algorithm: multi-start, fewer parameters (for example forecast-scaled levels), better optimisers.
 - A separate freshness target for the strictest channel, if Retail cells stay binding.
