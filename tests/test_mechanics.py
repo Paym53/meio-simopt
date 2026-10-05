@@ -963,16 +963,21 @@ def test_search_keeps_the_best_start_and_never_ends_worse_than_its_repaired_star
 def test_bullwhip_ratio_hand_examples():
     from meio.tables import bullwhip_ratio
     rng = np.random.default_rng(0)
-    demand = np.zeros((50, 30))
-    demand[:, 1:] = rng.normal(100, 20, (50, 29))
+    demand = np.zeros((400, 30))
+    demand[:, 1:] = rng.normal(100, 20, (400, 29))
     weeks = list(range(1, 25))
     assert abs(bullwhip_ratio(demand, demand, weeks, 0) - 1) < 1e-12        # orders = demand
     assert abs(bullwhip_ratio(2 * demand, demand, weeks, 0) - 4) < 1e-12    # amplified x 2
-    lumpy = np.zeros_like(demand)                                            # all demand of a
-    for start in range(1, 25, 4):                                            # 4-week bucket in one
-        lumpy[:, start] = demand[:, start:start + 4].sum(axis=1)              # order: no bullwhip
+    lumpy = np.zeros_like(demand)                                            # the same totals in
+    for start in range(1, 25, 4):                                            # lots every 4 weeks:
+        lumpy[:, start] = demand[:, start:start + 4].sum(axis=1)              # no bullwhip
     assert abs(bullwhip_ratio(lumpy, demand, weeks, 0) - 1) < 1e-9
-    assert bullwhip_ratio(demand, demand, [1, 2, 3, 4, 5], 0) is None       # too few buckets
+    steady = np.full_like(demand, 100.0)                                     # ignores demand: 0
+    assert bullwhip_ratio(steady, demand, weeks, 0) == 0
+    shifted = np.zeros_like(demand)                                          # orders 3 weeks ahead
+    shifted[:, 1:26] = demand[:, 4:29]                                       # of the demand they
+    assert abs(bullwhip_ratio(shifted, demand, weeks, 3) - 1) < 1e-12       # serve
+    assert bullwhip_ratio(demand, demand, [1], 0) is None                   # too few weeks
 
 
 def test_confirmation_seeds_reject_a_move_that_makes_a_cell_weak():

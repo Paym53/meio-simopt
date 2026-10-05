@@ -73,10 +73,14 @@ order cap. No parameters; without discount bands nothing changes.
 
 ## 5. Bullwhip
 
-The KPI table reports a **bullwhip ratio** per stage: variance of the orders (releases, supplier
-orders) summed over 4-week buckets divided by the variance of the demand they serve (FG
-equivalents, shifted by the median lead time). Buckets remove the pure lumpiness of lot sizing;
-about 1 = no amplification. The RMW policy works on the echelon position (RM at the RMW, on
+The KPI table reports a **bullwhip ratio** per stage (production releases, supplier orders): how
+strongly the stage's orders react to demand uncertainty. Per seed, the orders over the whole order
+window are summed, and so is the demand they serve (FG equivalents, shifted by the median lead
+time); the ratio is the variance of the order totals across seeds divided by the variance of the
+demand totals. Totals remove the lumpiness of lot sizing (lots of 10,000 units are not
+"bullwhip"); what remains is amplification of demand uncertainty. About 1 = passed on
+one-to-one, clearly above 1 = bullwhip. (Variance of weekly orders would mostly measure lot
+sizes: a policy with economic lots would always look "nervous".) The RMW policy works on the echelon position (RM at the RMW, on
 order and already inside FG), so it reacts to end-customer demand, not to the lumpy releases.
 
 ## 6. Benchmark

@@ -35,7 +35,7 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 | `decisions_to_commit` | One row per decision: `position`, `expected_waste`, `effective_position`, `reorder_level_s`, `order_up_to_level_S`, `rule_quantity`, `committed_quantity`, `note` |
 | `service` | `by_channel` (cells passing, worst week), `failed_cells`, `all_cells_pass` |
 | `costs` | Cost components (mean, share, P5, P95, SE) |
-| `kpis` | Pooled fill rates, waste, cancellations, stock levels |
+| `kpis` | Pooled fill rates, waste, cancellations, stock levels, bullwhip ratio per stage (production releases, supplier orders: variance across seeds of the order totals / of the demand totals they serve; about 1 = demand uncertainty passed on one-to-one, above 1 = amplified) |
 | `policy` | Optimised s and S per week for the DC and the RMW, order cap, RMW minimums |
 | `weekly_means_test_seeds` | Mean flows, positions and costs per week |
 | `meta` *(v2)* | `summary_version` (2), `products`, `materials`, `channels` per product, `horizon`, `weeks`, `evaluation_weeks {first, last}`, `commit_week` (1) |
@@ -49,7 +49,7 @@ The detailed `results.xlsx` stays available as a download.
 ## 3. Next steps (in this order)
 
 1. **Web API in this repo (done: `api.py`, tests in `tests/test_api.py`).**
-   - `POST /runs?preset=quick|standard|full`: accepts an input JSON, or `{"input": <input JSON>, "settings": {...}}` to override calculation settings of the preset, checks both (422 with a message if invalid), queues a background job and returns `{run_id, status: "queued", preset, policy, settings_overridden}`. Overridable settings and limits: `n_search_seeds` ≥ 50, `n_holdout_seeds` ≥ 100, `n_test_seeds` ≥ 500 (each at most the largest value among the allowed presets), `z` 0–5, `min_margin_bump` 0–0.1, `max_outer_rounds` 1–5, `max_improve_passes` 1–6, `step_fraction` 0.02–0.5, `lookahead_rm_steps` 0–8, `base_seed`. Runs take 1–6 minutes, so the request does not wait for the result. Runs are executed one at a time.
+   - `POST /runs?preset=quick|standard|full`: accepts an input JSON, or `{"input": <input JSON>, "settings": {...}}` to override calculation settings of the preset, checks both (422 with a message if invalid), queues a background job and returns `{run_id, status: "queued", preset, policy, settings_overridden}`. Overridable settings and limits: `n_search_seeds` ≥ 50, `n_holdout_seeds` ≥ 100, `n_test_seeds` ≥ 500 (each at most the largest value among the allowed presets), `z` 0–5, `min_margin_bump` 0–0.1, `max_outer_rounds` 1–5, `max_improve_passes` 1–6, `step_fraction` 0.02–0.5, `lookahead_rm_steps` 0–8, `base_seed`. Runs take 1–10 minutes (the search uses several CPU cores), so the request does not wait for the result. Runs are executed one at a time.
    - `GET /runs/{run_id}`: returns `{run_id, status, preset, summary, error}`; `status` is `queued`, `running`, `completed` or `failed`, and `summary` is `summary.json` once completed.
    - `GET /runs/{run_id}/results.xlsx`: the Excel download (404 until the run is completed).
    - `GET /health`: liveness probe.

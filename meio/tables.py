@@ -209,26 +209,23 @@ def cost_table(result: SimResult) -> pd.DataFrame:
     return df
 
 
-def bullwhip_ratio(orders: np.ndarray, demand: np.ndarray, order_weeks: list[int], shift: int,
-                   bucket: int = 4) -> float | None:
-    """Bullwhip ratio of one stage: variance of its orders divided by the variance of the
-    demand those orders are meant for, both summed over buckets of `bucket` weeks.
+def bullwhip_ratio(orders: np.ndarray, demand: np.ndarray, order_weeks: list[int], shift: int) -> float | None:
+    """Bullwhip ratio of one stage: how strongly its orders react to demand uncertainty.
 
-    orders, demand: (n_seeds, H + 1) arrays (FG equivalents). The orders of weeks
-    order_weeks are compared with the demand `shift` weeks later (the median time until the
-    order is available for sale). Buckets of several weeks remove the pure lumpiness of
-    lot sizing; what remains is real amplification. About 1 = orders follow demand without
-    amplification, clearly above 1 = bullwhip. Pooled over seeds (mean variance / mean
-    variance). None if fewer than three buckets fit into the order weeks."""
-    weeks = [t for t in order_weeks if t + shift < demand.shape[1]]
-    n_buckets = len(weeks) // bucket
-    if n_buckets < 3:
+    orders, demand: (n_seeds, H + 1) arrays (FG equivalents). Per seed, the orders placed in
+    order_weeks are summed and so is the demand they are meant for (`shift` weeks later, the
+    median time until an order is available for sale). The ratio is the variance of the order
+    totals across seeds divided by the variance of the demand totals. Totals over the whole
+    order window remove the lumpiness of lot sizing (when a lot is placed); what remains is
+    how much of the demand uncertainty the stage passes on. About 1 = passed on one-to-one,
+    clearly above 1 = amplified (bullwhip), below 1 = dampened. None without variation."""
+    weeks = np.asarray([t for t in order_weeks if t + shift < demand.shape[1]])
+    if len(weeks) < 2:
         return None
-    weeks = np.asarray(weeks[:n_buckets * bucket])
-    o = orders[:, weeks].reshape(len(orders), n_buckets, bucket).sum(axis=2)
-    d = demand[:, weeks + shift].reshape(len(demand), n_buckets, bucket).sum(axis=2)
-    var_d = d.var(axis=1, ddof=1).mean()
-    return float(o.var(axis=1, ddof=1).mean() / var_d) if var_d > 0 else None
+    var_d = demand[:, weeks + shift].sum(axis=1).var(ddof=1)
+    if not var_d > 0:
+        return None
+    return float(orders[:, weeks].sum(axis=1).var(ddof=1) / var_d)
 
 
 def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
@@ -255,8 +252,8 @@ def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
         rows.append((f"{p.name}: bullwhip ratio of production releases",
                      bullwhip_ratio(dc["released_P"], dc["demand"], dc_order_weeks(model, p),
                                     model.release_to_dc_median(p)),
-                     "variance of 4-week releases / variance of the 4-week demand they serve; "
-                     "about 1 = no amplification"))
+                     "variance (across seeds) of total releases / of the total demand they serve; "
+                     "about 1 = demand uncertainty passed on one-to-one, above 1 = amplified"))
     for m in model.materials:
         rm = result.rm[m.name]
         receipts = rm["receipts"][:, 1:].sum()
@@ -268,8 +265,8 @@ def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
         shift = m.lead_time_median + min(model.release_to_dc_median(p) for p in users)
         rows.append((f"{m.name}: bullwhip ratio of supplier orders",
                      bullwhip_ratio(rm["ordered_O"], need, rm_order_weeks(model, m), shift),
-                     "variance of 4-week orders / variance of the 4-week RM need (BOM x demand) they "
-                     "serve; about 1 = no amplification (empty: too few order weeks)"))
+                     "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) "
+                     "they serve; about 1 = passed on one-to-one, above 1 = amplified"))
     return pd.DataFrame(rows, columns=["KPI", "value", "note"])
 
 
