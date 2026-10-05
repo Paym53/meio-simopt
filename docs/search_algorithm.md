@@ -8,9 +8,10 @@ week-1 lookahead, `docs/policy_choice.md`), except for the price-break round-up 
 
 Decision variables per review: the week-specific levels s_t and S_t of every product (DC) and
 raw material (RMW), one order cap per product and one RMW minimum per material. Objective: the
-mean total cost over the horizon on the search seeds. Hard constraints: every fill-rate cell
-(product × channel × week in the evaluation window) satisfies the search rule
-`mean − Z·SE − margin ≥ F`. Hold-out and test rules are unchanged (CLAUDE.md).
+mean total cost over the horizon on the search seeds. Hard constraints (chance constraint): in
+every fill-rate cell (product × channel × week in the evaluation window) the share of futures
+whose fill rate reaches F is at least α (default 98 %); the search rule is
+`share − Z·SE − margin ≥ α`, hold-out and final verdict as in CLAUDE.md.
 
 ## 2. Why the old search fell short
 

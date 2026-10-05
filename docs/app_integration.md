@@ -20,7 +20,7 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 
 ## 2. The contract (already implemented)
 
-**Input.** A JSON document as in `examples/example_input.json`, described at the top of `meio/io_json.py`.
+**Input.** A JSON document as in `examples/example_input.json`, described at the top of `meio/io_json.py`. Optional `target_share_of_futures` (0–1, default 0.98): the share of futures in which every cell must reach its fill-rate target; lowering it (or a channel's F) lowers cost.
 - `horizon`, `production_capacity`, `capacity_overrides`
 - `products`: shelf life, channels (target fill rate, minimum remaining life), BOM (units of each material per FG unit, whole or fractional such as 0.2; the RM shipped is rounded up to whole units), batch size / MOQ, costs, discount tiers, lead-time distribution, closed weeks
 - `materials`: shelf life, batch size / MOQ, costs, lead-time distribution, supplier capacity, closed weeks, `rmw_to_pf_lead_time` (weeks from the RMW to production, whole number ≥ 0, optional, default 0). A product is produced when its slowest BOM material has arrived (τ_p = max over the BOM) and reaches the DC after τ_p plus the PF → DC lead time; capacity and closed production weeks refer to that production week
@@ -33,14 +33,14 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 |---|---|
 | `run` | Run metadata: timestamp, policy, preset, seeds, runtime, mean cost, cells passing, order cap, RMW minimums |
 | `decisions_to_commit` | One row per decision: `position`, `expected_waste`, `effective_position`, `reorder_level_s`, `order_up_to_level_S`, `rule_quantity`, `committed_quantity`, `note` |
-| `service` | `by_channel` (cells passing, worst week), `failed_cells`, `all_cells_pass` |
+| `service` | `by_channel` (cells passing, worst week = smallest share of futures meeting F, with `worst_week_futures_meeting_target` / `worst_week_futures` / `worst_week_share_meeting_target`, `target_share_of_futures`), `failed_cells`, `all_cells_pass` |
 | `costs` | Cost components (mean, share, P5, P95, SE) |
 | `kpis` | Pooled fill rates, waste, cancellations, stock levels |
 | `policy` | Optimised s and S per week for the DC and the RMW, order cap, RMW minimums |
 | `weekly_means_test_seeds` | Mean flows, positions and costs per week |
 | `meta` *(v2)* | `summary_version` (2), `products`, `materials`, `channels` per product, `horizon`, `weeks`, `evaluation_weeks {first, last}`, `commit_week` (1) |
 | `weekly_bands` *(v2)* | One entry per weekly series: `{location: DC\|RMW\|channel\|cost, item, channel, metric, mean[], p5[], p25[], p50[], p75[], p95[]}` over the test seeds, index 0 = week 1 (`null` where no seed has a value). Same series as `weekly_means_test_seeds`, plus `avg_remaining_life_end` (units-weighted shelf life − age of the stock at the end of the week) for every DC and RMW item |
-| `service.cells` *(v2)* | Every cell: `product, channel, week, target_fill_rate, mean_fill, se, seeds_with_demand, pass` |
+| `service.cells` *(v2)* | Every cell: `product, channel, week, target_fill_rate, target_share_of_futures, futures_meeting_target, seeds_with_demand, share_of_futures_meeting_target, mean_fill, se, pass`. **Service target (chance constraint):** a cell passes if its fill rate reaches `target_fill_rate` in at least `target_share_of_futures` (default 0.98) of the simulated futures, shown e.g. as "F met in 9,995 / 10,000 futures"; `mean_fill` is information only |
 | `baseline` *(v2)* | The heuristic start schedule of the search (same rule, quantile-based levels, initial cap and minimum), simulated on the same test seeds with the rule's own week-1 orders: `description, policy, mean_cost_over_horizon_test_seeds, test_cells_passing, costs, service_by_channel, kpis` |
 | `settings` *(v2)* | All calculation settings of the run (seed counts, `z`, margins, rounds, ...) |
 

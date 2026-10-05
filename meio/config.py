@@ -212,6 +212,7 @@ class ModelInput:
     initial_state: InitialState
     production_capacity: int                   # FG units per week, shared by all products
     capacity_overrides: dict[int, int] = field(default_factory=dict)  # week -> capacity
+    target_share_of_futures: float = 0.98      # alpha: every cell must meet its fill rate F in this share of futures
 
     # ----- helpers -----
     def material(self, name: str) -> Material:
@@ -455,6 +456,8 @@ def validate_input(model: ModelInput) -> None:
         if not isinstance(tau, int) or isinstance(tau, bool) or not 0 <= tau < model.horizon:
             problems.append(f"{m.name}: RMW -> PF lead time must be a whole number of weeks, "
                             f"0 <= tau < horizon (got {tau!r})")
+    if not 0 < model.target_share_of_futures <= 1:
+        problems.append(f"target_share_of_futures must be in (0, 1] (got {model.target_share_of_futures!r})")
     last_needed = model.horizon + 1
     if model.demand.last_week < last_needed:
         problems.append("demand forecast is shorter than the horizon")

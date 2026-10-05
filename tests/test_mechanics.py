@@ -203,22 +203,65 @@ def test_release_is_cut_by_the_short_material_and_rounded_to_supply_rules():
 # Fill-rate rules
 # ---------------------------------------------------------------------------
 def test_fill_rate_rules():
-    cells = pd.DataFrame({"product": ["F"] * 3, "channel": ["C"] * 3, "week": [9, 10, 11],
-                          "target_F": [0.95] * 3, "n_seeds_with_demand": [100, 100, 0],
-                          "mean_fill": [0.97, 0.955, np.nan], "se": [0.005, 0.001, 0.0]})
-    margins = {("F", "C", 10): 0.01}
+    """Chance constraint: a cell passes if the share of futures whose fill reaches F is >= alpha."""
+    class _Result:                                   # 100 futures, weeks 9-11 of a 12-week horizon
+        fill = {("F", "C"): np.full((100, 13), np.nan)}
+    f = _Result.fill[("F", "C")]
+    f[:, 9] = 1.0
+    f[:3, 9] = 0.5                                   # week 9: 97 of 100 futures reach F = 0.95
+    f[:, 10] = 0.96                                  # week 10: all 100 reach F (0.96 >= 0.95)
+    f[:, 11] = np.nan                                # week 11: no demand in any future
+    class _Model:
+        evaluation_weeks = [9, 10, 11]
+        target_share_of_futures = 0.95
+        products = [Product("F", 6, [Channel("C", 1, 0.95)], {}, 1, 1, 0, 0, 0, [Tier(0, 10**9, 1)],
+                            [Tier(0, 10**9, 1)], {1: 1.0})]
+    cells = service.cell_table(_Model, _Result)
+    assert list(cells["n_meeting_F"]) == [97, 100, 0] and list(cells["n_seeds_with_demand"]) == [97 + 3, 100, 0]
+    assert abs(cells["share_met"][0] - 0.97) < 1e-12 and cells["share_met"][1] == 1.0
+    p = (97 + 1) / (100 + 2)                                       # smoothed share for the SE
+    assert abs(cells["share_se"][0] - np.sqrt(p * (1 - p) / 100)) < 1e-12
+    assert abs(cells["mean_fill"][0] - (97 + 1.5) / 100) < 1e-12  # information only
+
+    margins = {("F", "C", 10): 0.04}
     out = service.apply_search_rule(cells, z=2.0, margins=margins)
-    # week 9: 0.97 - 0.01 - 0 = 0.96 >= 0.95 ok ; week 10: 0.955 - 0.002 - 0.01 = 0.943 fails ; week 11: no demand
-    assert list(out["search_feasible"]) == [True, False, True]
+    # week 9: 0.97 - 2 x 0.0167 = 0.937 < 0.95 fails; week 10: 1 - 2 x 0.0097 - 0.04 = 0.94 fails;
+    # week 11: no demand passes
+    assert list(out["search_feasible"]) == [False, False, True]
+    assert list(service.apply_search_rule(cells, z=0.0, margins={})["search_feasible"]) == [True, True, True]
 
     hold = cells.copy()
-    hold["mean_fill"] = [0.949, 0.96, np.nan]
+    hold["share_met"] = [0.949, 0.96, np.nan]
     weak = service.holdout_check(hold, margins, min_margin_bump=0.005)
     assert list(weak["week"]) == [9]
     assert abs(margins[("F", "C", 9)] - 0.005) < 1e-12        # max(0.005, 0.95 - 0.949 = 0.001)
 
     final = service.final_verdict(hold)
     assert list(final["test_pass"]) == [False, True, True]
+    # a high mean fill does not pass if too few futures reach F (the point of the chance constraint)
+    low_share = cells.copy()
+    low_share["share_met"], low_share["mean_fill"] = [0.90, 1.0, np.nan], [0.999, 1.0, np.nan]
+    assert list(service.final_verdict(low_share)["test_pass"]) == [False, True, True]
+
+
+def test_target_share_of_futures_in_json_and_validation():
+    import json
+    from dataclasses import replace
+    from meio.config import validate_input
+    from meio.io_json import model_from_dict, model_to_dict
+    model = build_example_input()
+    assert model.target_share_of_futures == 0.98                  # default
+    d = model_to_dict(replace(model, target_share_of_futures=0.95))
+    assert model_from_dict(json.loads(json.dumps(d))).target_share_of_futures == 0.95
+    d.pop("target_share_of_futures")
+    assert model_from_dict(d).target_share_of_futures == 0.98       # optional field
+    for bad in (0.0, 1.5):
+        try:
+            validate_input(replace(model, target_share_of_futures=bad))
+        except ValueError as exc:
+            assert "target_share_of_futures" in str(exc)
+        else:
+            raise AssertionError(bad)
 
 
 # ---------------------------------------------------------------------------

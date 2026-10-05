@@ -16,6 +16,10 @@
 > window, expected-waste windows, the heuristic start levels and the search's repair weeks. With all
 > $\tau_r=0$ the model is exactly the original one.
 
+> **Update (6 Oct 2026): chance constraint.** Section 11 is replaced: a cell passes if its fill rate reaches F in at
+> least alpha (`target_share_of_futures`, default 0.98) of the futures; search, hold-out and final verdict use that
+> share instead of the mean fill (`meio/service.py`, CLAUDE.md).
+>
 > **Update (5 Oct 2026): search algorithm v2 and price-break round-up.** Section 12.3 is superseded by
 > `docs/search_algorithm.md` (multi-start, coarse-to-fine block moves, restructure, confirmation seeds).
 > The DC order of step 3a is raised to a price-break quantity (not above the cap) when that is cheaper in total.
