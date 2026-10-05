@@ -36,6 +36,9 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -149,10 +152,17 @@ class Searcher:
         (they only lack the SimResult, which the improve phase does not need)."""
         if self.pool is None or len(schedules) < 2:
             return [self.evaluate(schedule) for schedule in schedules]
+        try:
+            futures = [self.pool.submit(_simulate_cells, schedule, self.settings.z, self.margins)
+                       for schedule in schedules]
+            outcomes = [future.result() for future in futures]
+        except BrokenProcessPool:
+            # e.g. a script without `if __name__ == "__main__":` - continue one after the other
+            warnings.warn("search worker processes failed; continuing without parallel evaluation")
+            self.pool = None
+            return [self.evaluate(schedule) for schedule in schedules]
         self.n_evaluations += len(schedules)
-        tasks = [(schedule, self.settings.z, self.margins) for schedule in schedules]
-        return [self.judge(schedule, cost, cells)
-                for schedule, (cost, cells) in zip(schedules, self.pool.starmap(_simulate_cells, tasks))]
+        return [self.judge(schedule, cost, cells) for schedule, (cost, cells) in zip(schedules, outcomes)]
 
     @contextmanager
     def workers(self):
@@ -161,16 +171,16 @@ class Searcher:
         if n <= 1:
             yield
             return
-        # "spawn" works the same on Windows, macOS and Linux and is safe inside the API's threads
-        pool = multiprocessing.get_context("spawn").Pool(n, initializer=_init_worker,
-                                                         initargs=(self.model, self.search_seeds))
+        # "spawn" works the same on Windows, macOS and Linux and is safe inside the API's threads;
+        # a broken worker raises BrokenProcessPool (handled in evaluate_many) instead of hanging
+        pool = ProcessPoolExecutor(max_workers=n, mp_context=multiprocessing.get_context("spawn"),
+                                   initializer=_init_worker, initargs=(self.model, self.search_seeds))
         self.pool = pool
         try:
             yield
         finally:
             self.pool = None
-            pool.terminate()
-            pool.join()
+            pool.shutdown(wait=True, cancel_futures=True)
 
     def judge(self, schedule: PolicySchedule, cost: float, cells: pd.DataFrame, result=None) -> Evaluation:
         """Feasibility of an evaluated schedule (see evaluate)."""
