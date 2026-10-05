@@ -80,10 +80,10 @@ Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` 
 4. **Final verdict.** Mean fill ≥ F for every (week × channel) cell after L_max, on the untouched test seeds, with no safety margin.
 5. **Baseline.** The heuristic start schedule is simulated on the same test seeds, so the report shows what the optimisation adds (cost and service).
 
-**Fill-rate rules.**
-- Search: `mean_fill − Z·SE − cell_margin ≥ F`, with Z = 2.
-- Hold-out: a cell is weak if `mean_fill < F`; then `margin += max(0.005, F − mean_fill)`.
-- Test: `mean_fill ≥ F`.
+**Fill-rate rules (chance constraint).** A cell is one product × channel × week. In one simulated future the cell *meets* its target if its fill rate `1 − lost / demand ≥ F`. The service target: every cell meets F in at least **α = 98 %** of the futures (`target_share_of_futures` in the input). Reported per cell as e.g. "F met in 9,995 / 10,000 futures".
+- Search: `share − Z·SE − cell_margin ≥ α`, with Z = 2 and `SE = sqrt(p(1−p)/n)`, `p = (met + 1)/(n + 2)`.
+- Hold-out: a cell is weak if `share < α`; then `margin += max(0.005, α − share)`.
+- Test: `share ≥ α`. The mean fill rate is shown as information.
 
 ## Weekly mechanics (`meio/simulation.py`)
 

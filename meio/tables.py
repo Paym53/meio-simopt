@@ -183,12 +183,14 @@ def schedule_table(model: ModelInput, start: PolicySchedule, final: PolicySchedu
 def service_cells_table(search_cells: pd.DataFrame, holdout_cells: pd.DataFrame,
                         test_cells: pd.DataFrame, unfixable: set) -> pd.DataFrame:
     keys = ["product", "channel", "week"]
-    s = search_cells[keys + ["target_F", "mean_fill", "se", "cell_margin", "search_lower_bound",
-                             "search_feasible"]].rename(columns={"mean_fill": "search_mean_fill",
-                                                                 "se": "search_se"})
-    h = holdout_cells[keys + ["mean_fill"]].rename(columns={"mean_fill": "holdout_mean_fill"})
-    t = test_cells[keys + ["n_seeds_with_demand", "mean_fill", "se", "test_pass"]].rename(
-        columns={"mean_fill": "test_mean_fill", "se": "test_se", "n_seeds_with_demand": "test_seeds_with_demand"})
+    s = search_cells[keys + ["target_F", "target_share", "share_met", "mean_fill", "se", "cell_margin",
+                             "search_lower_bound", "search_feasible"]].rename(
+        columns={"share_met": "search_share_met", "mean_fill": "search_mean_fill", "se": "search_se"})
+    h = holdout_cells[keys + ["share_met", "mean_fill"]].rename(
+        columns={"share_met": "holdout_share_met", "mean_fill": "holdout_mean_fill"})
+    t = test_cells[keys + ["n_seeds_with_demand", "n_meeting_F", "share_met", "mean_fill", "se", "test_pass"]].rename(
+        columns={"share_met": "test_share_met", "n_meeting_F": "test_futures_meeting_F", "mean_fill": "test_mean_fill",
+                 "se": "test_se", "n_seeds_with_demand": "test_seeds_with_demand"})
     out = s.merge(h, on=keys).merge(t, on=keys)
     out["declared_unfixable_in_search"] = [(p, c, w) in unfixable for p, c, w in
                                            zip(out["product"], out["channel"], out["week"])]

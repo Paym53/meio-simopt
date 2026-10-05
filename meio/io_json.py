@@ -17,6 +17,8 @@ Input format (all weeks are numbered from 1 = current review week):
   "horizon": 36,
   "production_capacity": 450,
   "capacity_overrides": {"18": 0},                           # optional: week -> capacity
+  "target_share_of_futures": 0.98,                           # optional: every cell must meet its fill
+                                                             # rate F in at least this share of futures
   "products": [ {name, shelf_life, channels: [{name, min_remaining_life, target_fill_rate}],
                  bom: {material: units per FG, whole or fractional e.g. 0.2}, batch_size, moq, holding_cost, waste_cost,
                  fixed_cost_per_release, production_tiers: [{lower, upper, unit_cost}],
@@ -73,6 +75,7 @@ def model_to_dict(model: ModelInput) -> dict:
         "horizon": model.horizon,
         "production_capacity": model.production_capacity,
         "capacity_overrides": {str(k): v for k, v in model.capacity_overrides.items()},
+        "target_share_of_futures": model.target_share_of_futures,
         "products": products,
         "materials": materials,
         "demand_forecast": forecast,
@@ -136,7 +139,8 @@ def model_from_dict(d: dict) -> ModelInput:
     return ModelInput(horizon=d["horizon"], products=products, materials=materials,
                       demand=DemandForecast(mean=mean, sd=sd), initial_state=state,
                       production_capacity=d["production_capacity"],
-                      capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()})
+                      capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()},
+                      target_share_of_futures=float(d.get("target_share_of_futures", 0.98)))
 
 
 def save_json(data: dict, path: str) -> None:
@@ -193,14 +197,20 @@ def records(df: pd.DataFrame, keys: dict | None = None) -> list[dict]:
 
 
 def service_by_channel(cells: pd.DataFrame) -> list[dict]:
-    """Per product and channel: cells passing on the test seeds and the worst week.
-    cells needs the columns product, channel, week, target_F, test_mean_fill, test_pass."""
+    """Per product and channel: cells passing on the test seeds and the worst week (the week
+    with the smallest share of futures meeting the fill-rate target). cells needs the columns
+    product, channel, week, target_F, target_share, test_share_met, test_futures_meeting_F,
+    test_seeds_with_demand, test_mean_fill, test_pass."""
     rows = []
     for (p, c), g in cells.groupby(["product", "channel"], sort=False):
-        worst = g.loc[g["test_mean_fill"].idxmin()]
+        worst = g.loc[g["test_share_met"].fillna(1.0).idxmin()]
         rows.append({"product": p, "channel": c, "target_fill_rate": float(g["target_F"].iloc[0]),
+                     "target_share_of_futures": float(g["target_share"].iloc[0]),
                      "cells_evaluated": int(len(g)), "cells_passing": int(g["test_pass"].sum()),
-                     "worst_week": int(worst["week"]), "worst_week_mean_fill": float(worst["test_mean_fill"])})
+                     "worst_week": int(worst["week"]), "worst_week_mean_fill": float(worst["test_mean_fill"]),
+                     "worst_week_futures_meeting_target": int(worst["test_futures_meeting_F"]),
+                     "worst_week_futures": int(worst["test_seeds_with_demand"]),
+                     "worst_week_share_meeting_target": float(worst["test_share_met"])})
     return rows
 
 
@@ -239,7 +249,9 @@ def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, ce
 
     Version 2 adds (only when given): meta, weekly_bands, service.cells, baseline, settings.
     The keys of version 1 are unchanged."""
-    failed = cells[~cells["test_pass"]][["product", "channel", "week", "target_F", "test_mean_fill", "test_se"]]
+    failed = cells[~cells["test_pass"]][["product", "channel", "week", "target_F", "target_share",
+                                         "test_futures_meeting_F", "test_seeds_with_demand", "test_share_met",
+                                         "test_mean_fill", "test_se"]]
     service = {"by_channel": service_by_channel(cells), "failed_cells": records(failed),
                "all_cells_pass": bool(cells["test_pass"].all())}
     summary = {
@@ -254,10 +266,13 @@ def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, ce
     if weekly_bands is not None:
         summary["meta"] = meta_dict(model)
         summary["weekly_bands"] = weekly_bands
-        service["cells"] = records(cells[["product", "channel", "week", "target_F", "test_mean_fill", "test_se",
-                                           "test_seeds_with_demand", "test_pass"]].rename(columns={
-            "target_F": "target_fill_rate", "test_mean_fill": "mean_fill", "test_se": "se",
-            "test_seeds_with_demand": "seeds_with_demand", "test_pass": "pass"}))
+        service["cells"] = records(cells[["product", "channel", "week", "target_F", "target_share",
+                                           "test_futures_meeting_F", "test_seeds_with_demand", "test_share_met",
+                                           "test_mean_fill", "test_se", "test_pass"]].rename(columns={
+            "target_F": "target_fill_rate", "target_share": "target_share_of_futures",
+            "test_futures_meeting_F": "futures_meeting_target", "test_seeds_with_demand": "seeds_with_demand",
+            "test_share_met": "share_of_futures_meeting_target",
+            "test_mean_fill": "mean_fill", "test_se": "se", "test_pass": "pass"}))
     if baseline is not None:
         summary["baseline"] = baseline
     if settings is not None:

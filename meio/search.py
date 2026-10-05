@@ -17,7 +17,7 @@ Simulation-optimisation of the (s, S) schedule (spec v5, Section 12.3).
                      lot together with the RMW levels that feed those releases. A move
                      is kept only if the mean cost falls, the schedule stays feasible on
                      the search seeds and - on an independent set of confirmation seeds -
-                     no cell becomes weak (mean fill < F) that was not weak before (guards against the
+                     no cell becomes weak (share of futures meeting F < alpha) that was not weak before (guards against the
                      optimizer's curse: among many candidates, some look feasible on the
                      search seeds by chance). An accepted move is repeated in the same
                      direction while it keeps paying off.
@@ -193,15 +193,15 @@ class Searcher:
         return Evaluation(schedule, result, cells, cost, failing == 0, failing)
 
     def confirmation(self, schedule: PolicySchedule, with_cost: bool = False):
-        """Cells that are weak on the confirmation seeds - mean fill below target, the hold-out
-        rule (the search seeds already carry Z x SE and the margins) - and the mean fill of the
-        unfixable cells there (an unfixable cell counts as weak below its confirmation floor)."""
+        """Cells that are weak on the confirmation seeds - share of futures meeting F below alpha,
+        the hold-out rule (the search seeds already carry Z x SE and the margins) - and that
+        share for the unfixable cells (an unfixable cell is weak below its confirmation floor)."""
         self.n_evaluations += 1
         result = simulate(self.model, schedule, self.confirm_seeds, report_details=False)
         cells = service.cell_table(self.model, result)
         failing, means = set(), {}
         for p, c, w, mean, target in zip(cells["product"], cells["channel"], cells["week"],
-                                         cells["mean_fill"], cells["target_F"]):
+                                         cells["share_met"], cells["target_share"]):
             key = (p, c, int(w))
             if np.isnan(mean):
                 continue
@@ -215,7 +215,7 @@ class Searcher:
 
     def confirmed(self, schedule: PolicySchedule) -> bool:
         """Optimizer's-curse check of a move the search seeds accepted: on the independent
-        confirmation seeds no cell may become weak (mean fill < F) that was not weak before
+        confirmation seeds no cell may become weak (share of futures meeting F < alpha) that was not weak before
         the move (the same "no cell worse" idea as the week-1 lookahead). Without
         confirmation seeds: True."""
         if self.confirm_seeds is None:
@@ -237,10 +237,10 @@ class Searcher:
 
     @staticmethod
     def service_gap(ev: Evaluation) -> float:
-        """Total gap to target over all cells, sum of max(0, F - search lower bound):
+        """Total gap to target over all cells, sum of max(0, alpha - search lower bound):
         0 when every cell passes. Compares starts on service before cost."""
         cells = ev.cells
-        return float((cells["target_F"] - cells["search_lower_bound"]).clip(lower=0).fillna(0).sum())
+        return float((cells["target_share"] - cells["search_lower_bound"]).clip(lower=0).fillna(0).sum())
 
     # ------------------------------------------------------------------
     # Step sizes and moves

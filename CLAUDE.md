@@ -29,11 +29,11 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 - **Allocation.** Oldest age first; within an age, the channel with the tightest shelf-life requirement first (ties: higher target fill rate). Lost sales.
 - **Lead times.** Random and order-preserving. Lead times are drawn per order week, which keeps common random numbers across candidate policies.
 - **RMW -> PF lead time τ_r per material** (`materials[].rmw_to_pf_lead_time`, deterministic, default 0). All BOM materials leave the RMW in the release week t; production starts when the slowest has arrived, in week t+τ_p with τ_p = max τ_r over the BOM (`ModelInput.rmw_to_pf_lead_time(p)`); its capacity (booked per production week, shared across products) and closed weeks apply; FG arrives at t+τ_p+L~. Every lead-time-based quantity uses τ_p+L (`ModelInput.release_to_dc_*`, `production_week`, `policy.feeding_release_weeks`); all τ_r = 0 must reproduce the original model exactly.
-- **Fill-rate rules** (`meio/service.py`):
-  - search: `mean - Z*SE - margin >= F`;
-  - hold-out: weak if `mean < F`, then `margin += max(bump, F - mean)`;
-  - final verdict: `mean >= F`, with no Z and no margin.
-  - Seeds with zero demand in a cell are excluded. The evaluation window starts after the global L_max.
+- **Fill-rate rules** (`meio/service.py`), a chance constraint per cell (product × channel × week): a future (seed) *meets* the target if its fill `1 - lost/demand >= F`; `share` = futures meeting F / futures with demand; `alpha` = `target_share_of_futures` (input, default 0.98):
+  - search: `share - Z*SE_share - margin >= alpha`, with `SE_share = sqrt(p(1-p)/n)`, `p = (met+1)/(n+2)`;
+  - hold-out: weak if `share < alpha`, then `margin += max(bump, alpha - share)`;
+  - final verdict: `share >= alpha`, with no Z and no margin; reported as "F met in x / n futures".
+  - The mean fill is reported as information only. Seeds with zero demand in a cell are excluded. The evaluation window starts after the global L_max.
 - **Speed-ups never change results.** Fast paths (vectorised FIFO withdrawal/allocation over ages, running pipeline totals, constants precomputed per `simulate` call, `report_details=False` in the search and lookahead) must stay bit-identical to the step-by-step versions; `tests/test_mechanics.py` compares them against reference loops. The float expected-waste projection keeps its sequential arithmetic (order of float operations matters).
 - **Cut releases** still respect batch size and MOQ (round down; below the MOQ nothing is released).
 - **BOM quantities** may be fractional (e.g. 0.2). RM shipped for a release = quantity × P rounded **up** to whole units, in exact integer arithmetic (`config.rm_units_for`, `config.max_fg_from`); whole-number BOMs give exactly the old results.

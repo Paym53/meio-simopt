@@ -55,17 +55,20 @@ def print_results(model: ModelInput, decisions: pd.DataFrame, schedule_df: pd.Da
     short = schedule_df[keep].head(10).rename(columns=lambda c: c.replace(" (optimised)", ""))
     print(short.to_string(index=False, na_rep=""))
 
-    _title("SERVICE - final verdict on untouched test seeds (mean fill >= F per cell)")
+    alpha = cells["target_share"].iloc[0] if len(cells) else 0.0
+    _title(f"SERVICE - final verdict on untouched test seeds: fill >= F in >= {alpha:.0%} of futures per cell")
     for (p, c), grp in cells.groupby(["product", "channel"], sort=False):
         passed = int(grp["test_pass"].sum())
-        worst = grp.loc[grp["test_mean_fill"].idxmin()]
-        print(f"{p} {c:<8} target {grp['target_F'].iloc[0]:.2f}: {passed}/{len(grp)} cells pass | "
-              f"worst week {int(worst['week'])}: mean fill {worst['test_mean_fill']:.4f}")
+        worst = grp.loc[grp["test_share_met"].idxmin()]
+        print(f"{p} {c:<8} F {grp['target_F'].iloc[0]:.2f}: {passed}/{len(grp)} cells pass | worst week "
+              f"{int(worst['week'])}: F met in {int(worst['test_futures_meeting_F'])}/"
+              f"{int(worst['test_seeds_with_demand'])} futures ({worst['test_share_met']:.2%}), "
+              f"mean fill {worst['test_mean_fill']:.4f}")
     failed = cells[~cells["test_pass"]]
     if len(failed):
         print("\nFailed cells:")
-        print(failed[["product", "channel", "week", "target_F", "test_mean_fill", "test_se",
-                      "declared_unfixable_in_search"]].to_string(index=False))
+        print(failed[["product", "channel", "week", "target_F", "test_futures_meeting_F", "test_seeds_with_demand",
+                      "test_share_met", "test_mean_fill", "declared_unfixable_in_search"]].to_string(index=False))
     else:
         print("\nAll cells pass.")
 

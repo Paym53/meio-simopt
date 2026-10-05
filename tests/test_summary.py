@@ -69,8 +69,7 @@ def test_baseline_is_the_start_schedule_on_the_same_seeds():
 
 
 def _summary(**v2):
-    cells = service.final_verdict(service.cell_table(MODEL, RESULT)).rename(columns={
-        "mean_fill": "test_mean_fill", "se": "test_se", "n_seeds_with_demand": "test_seeds_with_demand"})
+    cells = service.as_test_columns(service.final_verdict(service.cell_table(MODEL, RESULT)))
     empty = pd.DataFrame({"a": [1]})
     return build_summary(MODEL, {"policy": "x"}, pd.DataFrame(columns=["Decision"]), cells, empty, empty,
                          SCHEDULE, tables.weekly_means_table(MODEL, RESULT), **v2)
@@ -86,7 +85,10 @@ def test_version_2_keys_are_added_without_changing_version_1():
             assert v1[key] == v2[key], key
     cell = v2["service"]["cells"][0]
     assert set(cell) == {"product", "channel", "week", "target_fill_rate", "mean_fill", "se",
-                         "seeds_with_demand", "pass"}
+                         "seeds_with_demand", "pass",
+                         # chance constraint (Oct 2026): F met in at least alpha of the futures
+                         "target_share_of_futures", "futures_meeting_target", "share_of_futures_meeting_target"}
+    assert cell["pass"] == (cell["share_of_futures_meeting_target"] >= cell["target_share_of_futures"])
     assert v2["meta"]["evaluation_weeks"] == {"first": MODEL.evaluation_weeks[0], "last": MODEL.horizon}
     json.dumps(v2, allow_nan=False)                         # strict JSON: NaN became null
 
