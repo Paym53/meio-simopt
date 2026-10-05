@@ -4,6 +4,23 @@
 `docs/model_specification_v5.md` §12.3. The policy is unchanged (age-aware capped (s,S) +
 week-1 lookahead, `docs/policy_choice.md`), except for the price-break round-up of DC orders.*
 
+## 0. Decomposition into independent groups (`meio/decompose.py`)
+
+Before the search, products are split into groups that share nothing: two products are in the
+same group if they are made at the same production site (shared capacity and closed weeks) or
+use a common raw material (shared RMW stock, supplier orders). Union-find over these links gives
+the connected components. Each group is a complete sub-model (its products, their materials and
+sites, demand and initial state) and is searched on its own with its own search and hold-out
+seeds; the evaluation window stays the global one (`evaluation_start`). The schedules, margins
+and logs are merged afterwards; lookahead and the final verdict run on the full model.
+
+Why: the search effort grows with the number of levels and cells, and moves for one group
+cannot change another group's cost or service. Example data: {FG1, FG2, FG3} (site S1, shared
+RM_A … RM_F) and {FG4} (site S2, RM_G … RM_I). With a single group the result is exactly that
+of the search on the full model (tested). Constraints across products that are added later
+(e.g. a joint MOQ for several items) become one more link type, so linked products stay in
+one group.
+
 ## 1. What is optimised
 
 Decision variables per review: the week-specific levels s_t and S_t of every product (DC) and
@@ -50,8 +67,10 @@ feeding RMW levels by 50 % or 100 % of the extra need, repair, improve once, and
 if it is feasible, cheaper and confirmed (below).
 
 **Confirmation seeds (optimizer's curse).** An independent set of 2 × the search seeds. Only
-accepted moves are simulated on it: no cell may become weak there (mean fill < F, the hold-out
+accepted moves are simulated on it: no cell may become weak there (share of futures meeting F < α, the hold-out
 rule) that was not weak before. Restructure jumps must also be cheaper there.
+
+**Closed production weeks.** If every release week that could reach a failing cell is closed (site or product calendar), the repair raises the levels of the latest open order week before them (pre-build), instead of declaring the cell unfixable.
 
 **Service guard.** Cells the repair cannot fix are excluded from the target, but no improve phase
 may lower their service below its value at the start of the phase. Repair counts a step as

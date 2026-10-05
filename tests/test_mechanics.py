@@ -621,7 +621,7 @@ def _two_product_model(capacity_week_2: int):
                      fixed_order_cost=1, holding_cost=0.01, waste_cost=1, transport_cost=0.1,
                      lead_time_dist={3: 1.0}, rmw_to_pf_lead_time=tau) for x, tau in (("A", 1), ("B", 0))]
     H = 6
-    zeros = np.zeros(H + 1)
+    zeros = np.zeros(H + 2)
     demand = DemandForecast(mean={("F1", "Only"): zeros, ("F2", "Only"): zeros},
                             sd={("F1", "Only"): zeros, ("F2", "Only"): zeros})
     state = InitialState(dc_stock={"F1": {}, "F2": {}}, rm_stock={"A": {1: 500}, "B": {1: 500}},
@@ -1052,13 +1052,16 @@ def test_parallel_search_gives_exactly_the_sequential_result():
 # Several products: production sites and independent groups
 # ---------------------------------------------------------------------------
 def _sites_model(site_of_f2: str):
-    """F1 (material A) at site S1, F2 (material B) at site_of_f2; S1 has 100 units in week 2."""
+    """F1 (material A) at site S1, F2 (material B) at site_of_f2; both with tau 1 (release in
+    week t is produced in week t+1); S1 has 100 units in week 2, S2 is closed in week 3."""
     from dataclasses import replace
     from meio.config import ProductionSite
     model = _two_product_model(capacity_week_2=1000)
     products = [replace(model.products[0], site="S1"), replace(model.products[1], site=site_of_f2)]
+    materials = [replace(x, rmw_to_pf_lead_time=1) for x in model.materials]
     sites = [ProductionSite("S1", 1000, {2: 100}), ProductionSite("S2", 1000, {}, [3])]
-    return replace(model, products=products, sites=sites, production_capacity=0, capacity_overrides={})
+    return replace(model, products=products, materials=materials, sites=sites,
+                   production_capacity=0, capacity_overrides={})
 
 
 def test_products_share_the_capacity_of_their_own_site_only():
@@ -1067,9 +1070,9 @@ def test_products_share_the_capacity_of_their_own_site_only():
     for model in (shared, separate):
         assert model.capacity_in_week(2, model.products[0]) == 100
     assert separate.capacity_in_week(2, separate.products[1]) == 1000
-    # the site's closed week 3 applies to F2 at S2 only (tau of F2 is 0: release week = production week)
-    assert 3 not in dc_order_weeks(separate, separate.products[1])
-    assert 3 in dc_order_weeks(shared, shared.products[1])
+    # the site's closed week 3 applies to F2 at S2 only (release week 2 = production week 3)
+    assert 2 not in dc_order_weeks(separate, separate.products[1])
+    assert 2 in dc_order_weeks(shared, shared.products[1])
 
     H = shared.horizon
     def run(model):
@@ -1079,13 +1082,12 @@ def test_products_share_the_capacity_of_their_own_site_only():
                                rm_S={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
                                dc_cap={"F1": 1000, "F2": 1000}, rm_floor={"A": 0, "B": 0})
         return simulate(model, sched, build_scenarios(model, 3, 1, "t"))
-    # F1 (tau 1) released in week 1 is produced in week 2 at S1 (capacity 100) -> at most 100
+    # both release in week 1 and are produced in week 2: at S1 they share its 100 units,
+    # at S2 F2 has its own 1000 units and gets its full order of 400
     r_shared, r_separate = run(shared), run(separate)
-    assert r_shared.dc["F1"]["released_P"][0, 1] <= 100
-    # F2 (tau 0) released in week 2 is produced in week 2: at S1 it gets what F1 left of the 100,
-    # at S2 it has its own 1000 units
-    assert r_shared.dc["F2"]["released_P"][0, 2] + r_shared.dc["F1"]["released_P"][0, 1] <= 100
-    assert r_separate.dc["F2"]["released_P"][0, 2] > 100
+    assert (r_shared.dc["F1"]["released_P"][:, 1] + r_shared.dc["F2"]["released_P"][:, 1]).max() <= 100
+    assert r_separate.dc["F1"]["released_P"][:, 1].max() <= 100
+    assert (r_separate.dc["F2"]["released_P"][:, 1] == 400).all()
 
 
 def test_independent_groups_follow_shared_sites_and_materials():
@@ -1141,3 +1143,33 @@ def test_sites_in_json_and_validation():
         raise AssertionError("unknown site accepted")
     no_sites = model_to_dict(build_example_input())
     assert "sites" not in no_sites and model_from_dict(no_sites).all_sites()[0].capacity == 450
+
+
+def test_repair_pre_builds_when_every_feeding_release_week_is_closed():
+    from dataclasses import replace
+    from meio.policy import dc_order_weeks
+    from meio.search import Searcher
+    base = build_example_input(horizon=16)
+    p = base.products[0]
+    week = base.evaluation_weeks[2]
+    window = range(week - base.release_to_dc_max(p), week - base.release_to_dc_min(p) + 1)
+    closed = sorted({base.production_week(p, r) for r in window})
+    plenty = {m: {age: 10 * q for age, q in ages.items()} for m, ages in base.initial_state.rm_stock.items()}
+    model = replace(base, products=[replace(p, closed_production_weeks=closed)] + base.products[1:],
+                    initial_state=replace(base.initial_state, rm_stock=plenty))     # no RM shortage
+    p = model.products[0]
+    settings = SearchSettings(n_search_seeds=20, n_holdout_seeds=20, n_quantile_samples=200, n_workers=1)
+    searcher = Searcher(model, settings, build_scenarios(model, 20, 1, "s"), build_scenarios(model, 20, 2, "h"),
+                        verbose=False)
+    schedule = initial_schedule(model, settings)
+    before = schedule.copy()
+    changed, text = searcher.raise_levels_for_cell(schedule, searcher.evaluate(schedule).result, p.name, week)
+    assert changed and "pre-build before closed production weeks" in text
+    # the raise lands in the latest open order week before the closed ones (DC or the RM feeding it)
+    target = max(r for r in dc_order_weeks(model, p) if r < window[0])
+    assert schedule.dc_S[p.name][target] > before.dc_S[p.name][target] or \
+        schedule.dc_cap[p.name] > before.dc_cap[p.name] or \
+        any((schedule.rm_S[m] != before.rm_S[m]).any() for m in p.bom)
+    # a week that no release week can reach at all (before the first one) stays unfixable
+    early = model.release_to_dc_min(p)
+    assert searcher.raise_levels_for_cell(schedule, searcher.evaluate(schedule).result, p.name, early)[0] is False

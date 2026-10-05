@@ -62,6 +62,8 @@ def model_to_dict(model: ModelInput) -> dict:
     for p in model.products:
         d = asdict(p)
         d["lead_time_dist"] = dist(p.lead_time_dist)
+        if not p.site:
+            d.pop("site")                    # single default site: keep the old format
         products.append(d)
     materials = []
     for m in model.materials:
@@ -76,12 +78,12 @@ def model_to_dict(model: ModelInput) -> dict:
     s = model.initial_state
     return {
         "horizon": model.horizon,
-        "production_capacity": model.production_capacity,
-        "capacity_overrides": {str(k): v for k, v in model.capacity_overrides.items()},
-        "target_share_of_futures": model.target_share_of_futures,
         **({"sites": [{"name": s.name, "capacity": s.capacity,
                        "capacity_overrides": {str(k): v for k, v in s.capacity_overrides.items()},
-                       "closed_weeks": list(s.closed_weeks)} for s in model.sites]} if model.sites else {}),
+                       "closed_weeks": list(s.closed_weeks)} for s in model.sites]} if model.sites else
+           {"production_capacity": model.production_capacity,
+            "capacity_overrides": {str(k): v for k, v in model.capacity_overrides.items()}}),
+        "target_share_of_futures": model.target_share_of_futures,
         "products": products,
         "materials": materials,
         "demand_forecast": forecast,
@@ -238,13 +240,21 @@ def policy_dict(model: ModelInput, schedule) -> dict:
 
 
 def meta_dict(model: ModelInput) -> dict:
-    """What the summary covers: items, channels, weeks, evaluation window, commit week."""
+    """What the summary covers: items, channels, production sites, independent groups,
+    weeks, evaluation window, commit week."""
+    from meio.decompose import independent_groups
     weeks = model.evaluation_weeks
     return {
         "summary_version": 2,
         "products": [p.name for p in model.products],
         "materials": [m.name for m in model.materials],
         "channels": {p.name: [c.name for c in p.channels] for p in model.products},
+        "bom": {p.name: dict(p.bom) for p in model.products},
+        "sites": [{"name": site.name, "capacity": site.capacity,
+                   "products": [p.name for p in model.products if model.site_of(p).name == site.name]}
+                  for site in model.all_sites()],
+        "product_site": {p.name: model.site_of(p).name for p in model.products},
+        "independent_groups": independent_groups(model),
         "horizon": model.horizon,
         "weeks": list(range(1, model.horizon + 1)),
         "evaluation_weeks": {"first": weeks[0], "last": weeks[-1]} if weeks else None,
