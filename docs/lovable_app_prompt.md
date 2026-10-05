@@ -111,8 +111,11 @@ is service safe, what does it cost, what are the options), then the reasons.
 
 #### 4.1 Input JSON (scenario draft), exactly this format
 ```
-horizon (weeks H), production_capacity (units/week), capacity_overrides {"week": capacity}
-products[]: name, shelf_life (weeks), bom {material: units per FG}, batch_size, moq,
+horizon (weeks H)
+sites[]: name, capacity (FG units per production week, shared by all products of the site),
+  capacity_overrides {"week": capacity}, closed_weeks [week]
+  (optional; without sites the old production_capacity / capacity_overrides define one site "PF")
+products[]: name, site (one of sites[].name), shelf_life (weeks), bom {material: units per FG}, batch_size, moq,
   holding_cost (per unit-week), waste_cost (per unit), fixed_cost_per_release,
   production_tiers [{lower, upper, unit_cost}], transport_tiers [{lower, upper, unit_cost}]
   (all-units discounts: the rate of the band applies to all units),
@@ -144,7 +147,13 @@ Client-side validation (block "Run", list the problems next to the fields): lead
 probabilities sum to 1 per item; MOQ is a multiple of the batch size; required remaining life <
 shelf life; every BOM material exists; cost tiers are contiguous (next.lower = previous.upper + 1);
 initial stock ages within 1..max sellable/shippable age; forecast covers at least H + 1 weeks;
-target fill rates within 0..1.
+target fill rates within 0..1; site names unique and every product's site defined.
+
+Several products: products sharing a site share its weekly capacity and closed weeks; products
+with the same material in their BOM share its RMW stock and supplier orders. The engine optimises
+independent groups (no shared site or material) separately; `summary.meta` lists `sites`,
+`product_site`, `bom` and `independent_groups`. Every product-level view gets a product filter;
+show results grouped by site.
 
 #### 4.2 Output `summary` (from `GET /runs/{id}`)
 Arrays over weeks have index 0 = W1.
@@ -510,3 +519,14 @@ overrides" view once actuals are uploaded.
 > Review every tab against the quality bar (section 9) and the design system (section 6): spacing,
 > number formats, fixed colours per entity, tooltips, empty and loading states, keyboard use. List
 > anything you could not implement.
+
+**Phase 8 - Several products and production sites.**
+> Update the scenario editor to the multi-product input (4.1): a **Sites** editor (name, weekly
+> capacity, capacity overrides, closed weeks), a **site** dropdown per product, and a BOM matrix
+> (products × materials) that highlights materials used by several products. Replace the
+> "Example data" scenario with the new `examples/example_input.json` (four products: FG1-FG3 at
+> site S1, FG4 at site S2; I will paste it). In every result tab add a product filter (default:
+> all), show KPIs and cost per product and per site from `summary.meta.product_site`, show the
+> site capacity use per week (sum of released production of its products vs capacity), and show
+> the independent groups from `summary.meta.independent_groups` in the explainability tab
+> ("optimised separately because they share no site or material").

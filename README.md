@@ -14,6 +14,8 @@ Every week (review period 1 week) the model decides:
 
 Demand is given as non-stationary forecast distributions per week and channel. Lead times are random and order-preserving. Unmet demand is lost. Each channel has a minimum remaining shelf life and a per-week fill-rate target.
 
+**Several products.** Any number of finished goods, each with its own data (channels, BOM, lots, costs, lead times, forecast). Products can share raw materials (the same material in several BOMs) and production sites (`sites` in the input, `products[].site`): a site's weekly capacity and closed weeks apply to all products made there. The default dataset `examples/example_input.json` has four: FG1, FG2 and FG3 at site S1 sharing RM_A … RM_F, and FG4 at site S2 with its own materials RM_G … RM_I.
+
 **Ordering policy.** The model uses one policy: an age-aware (s,S) rule with a DC order cap and a minimum physical RM stock, tuned by simulation-optimisation, plus a **week-1 lookahead** that chooses the orders committed now by simulating candidate quantities from the current state. Why this policy: see [`docs/policy_choice.md`](docs/policy_choice.md).
 
 ## Quick start
@@ -40,7 +42,7 @@ Each run creates a folder `output/run_<timestamp>/` containing:
 | Option | Meaning |
 |---|---|
 | `--input file.json` | Your own input (format: `examples/example_input.json`, described in `meio/io_json.py`) |
-| `--preset quick\|standard\|full` | Seed counts and search effort (200/400/2,000 … 500/1,000/10,000 seeds) |
+| `--preset quick\|standard\|full` | Seed counts and search effort (search / hold-out / test: 200/1,000/2,000 … 500/2,500/10,000 seeds) |
 | `--out-dir`, `--name` | Where the run folder is written |
 
 Other scripts:
@@ -69,16 +71,17 @@ Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` 
 ## How a run works
 
 1. **Seeds.** Three disjoint sets of random futures (search, hold-out, test), each with demand and lead-time draws.
-2. **Tune the rule.** Week-specific s and S at the DC and RMW, plus the order cap and RMW minimums:
+2. **Split into independent groups** (`meio/decompose.py`). Products linked by a shared site or raw material form one group; groups share nothing, so each is optimised on its own (smaller search, fewer cells to protect). Example: {FG1, FG2, FG3} and {FG4}. With one group the search is exactly the single-model search.
+3. **Tune the rule** (per group). Week-specific s and S at the DC and RMW, plus the order cap and RMW minimums:
    - **multi-start**: the classic quantile start, an economic-lot start (EOQ cover, bounded by shelf life) and price-break starts; each is repaired and raced with one coarse pass, the best continues;
    - **repair**: raise the levels that feed failing cells;
    - **improve**: coarse-to-fine pattern search on blocks of weeks (whole horizon → single weeks), incl. a coordinated move of the DC lot with the RMW levels that feed it; every accepted move is double-checked on independent confirmation seeds (optimizer's curse);
    - **restructure**: large jumps of the lot structure to price breaks with RM support, kept only if cheaper and confirmed;
    - **hold-out check**: raise the safety margin of cells the search over-fitted.
    Details and benchmark: [`docs/search_algorithm.md`](docs/search_algorithm.md).
-3. **Lookahead.** Choose this week's orders by simulating candidates. The DC order goes first, then each RM order. A candidate may not fail any cell the rule's own quantity passes.
-4. **Final verdict.** Mean fill ≥ F for every (week × channel) cell after L_max, on the untouched test seeds, with no safety margin.
-5. **Baseline.** The heuristic start schedule is simulated on the same test seeds, so the report shows what the optimisation adds (cost and service).
+4. **Lookahead.** Choose this week's orders by simulating candidates. The DC order goes first, then each RM order. A candidate may not fail any cell the rule's own quantity passes.
+5. **Final verdict.** For every cell (product × channel × week after L_max): F met in ≥ α of the untouched test futures, with no safety margin.
+6. **Baseline.** The heuristic start schedule is simulated on the same test seeds, so the report shows what the optimisation adds (cost and service).
 
 **Fill-rate rules (chance constraint).** A cell is one product × channel × week. In one simulated future the cell *meets* its target if its fill rate `1 − lost / demand ≥ F`. The service target: every cell meets F in at least **α = 98 %** of the futures (`target_share_of_futures` in the input). Reported per cell as e.g. "F met in 9,995 / 10,000 futures".
 - Search: `share − Z·SE − cell_margin ≥ α`, with Z = 2 and `SE = sqrt(p(1−p)/n)`, `p = (met + 1)/(n + 2)`.
@@ -91,7 +94,7 @@ Runs are executed one at a time. Optional environment variables: `MEIO_API_KEY` 
 2. **Receipts** (enter at age 1).
 3. **Ordering and release:**
    - **3a DC order:** the effective position (on hand + pipeline − expected waste) is compared with s; the order goes up to S, rounded to batch/MOQ, capped.
-   - **3b Release:** the order is capped by usable RM, the capacity left in the production week (release week + τ_p, shared by all products produced that week), batch and MOQ; the rest is cancelled.
+   - **3b Release:** the order is capped by usable RM (shared materials: products in list order), the capacity left at the product's site in the production week (release week + τ_p, shared by all products of that site), batch and MOQ; the rest is cancelled.
    - **3c RM transport:** oldest first; all BOM materials leave the RMW now. Material r needs τ_r weeks to production (`materials[].rmw_to_pf_lead_time`, default 0; example: 1 for every material). Production starts when the slowest has arrived (τ_p = max τ_r of the BOM); the FG reaches the DC after τ_p + the random PF → DC lead time.
    - **3d RM order:** based on the effective echelon position, or on the physical RM position falling below its minimum.
 4. **Demand:** oldest age first; within an age, the tightest channel first (ties: higher F); unmet demand is lost.
@@ -116,6 +119,7 @@ meio/
   simulation.py            weekly simulation (steps 1-6), expected-waste projections
   policy.py                (s,S) schedule, order weeks, start schedule, committed decisions
   search.py                repair -> improve -> hold-out search
+  decompose.py             independent product groups (shared site / material), one search per group
   lookahead.py             week-1 lookahead
   service.py               fill-rate cells and the three rules
   rolling.py               state update between reviews
@@ -123,7 +127,7 @@ meio/
 tests/test_mechanics.py    unit tests (conservation, FIFO, arrivals, rules, JSON)
 tests/test_api.py          web API tests (input checks, run lifecycle, API key)
 tests/test_deployment.py   render.yaml consistent with api.py and CI
-examples/                  example_input.json (the app's default dataset: FG1, ~4,000 units/week) and example_summary.json (its quick run)
+examples/                  example_input.json (the app's default dataset: FG1-FG4 at two sites, ~2,600-4,000 units/week each) and example_summary.json (its quick run)
 docs/                      specification, policy choice, app integration plan
 ```
 
@@ -131,7 +135,8 @@ docs/                      specification, policy choice, app integration plan
 
 - ✅ Running model with the age-aware capped (s,S) + lookahead policy, Excel and JSON output, tests and CI.
 - ✅ Search algorithm v2: multi-start, coarse-to-fine block moves, coordinated echelon moves, price-break restructuring, confirmation seeds, parallel evaluation (`docs/search_algorithm.md`): −2 to −37 % cost or clearly better service on all eight benchmark instances.
-- ⏭ Several finished goods sharing raw materials; realistic holding costs (value × rate + storage).
+- ✅ Several finished goods sharing raw materials and production sites; optimisation per independent group.
+- ⏭ Multi-item constraints (e.g. a joint MOQ over several products); realistic holding costs (value × rate + storage).
 - ✅ Web API (`api.py`) with Render Blueprint (`render.yaml`).
 - ⏭ Lovable frontend: see [`docs/app_integration.md`](docs/app_integration.md).
 

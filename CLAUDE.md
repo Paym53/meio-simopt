@@ -35,12 +35,13 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
   - final verdict: `share >= alpha`, with no Z and no margin; reported as "F met in x / n futures".
   - The mean fill is reported as information only. Seeds with zero demand in a cell are excluded. The evaluation window starts after the global L_max.
 - **Speed-ups never change results.** Fast paths (vectorised FIFO withdrawal/allocation over ages, running pipeline totals, constants precomputed per `simulate` call, `report_details=False` in the search and lookahead) must stay bit-identical to the step-by-step versions; `tests/test_mechanics.py` compares them against reference loops. The float expected-waste projection keeps its sequential arithmetic (order of float operations matters).
+- **Several products and sites.** `products[].site` names a `sites[]` entry (capacity, overrides, closed weeks per production week, shared by the site's products); without `sites` one default site `PF` is built from `production_capacity` / `capacity_overrides` and results are unchanged. Shared RM and site capacity go to products in list order. `meio/decompose.py` splits products linked by a shared site or material into independent groups and searches each on its own sub-model (`evaluation_start` keeps the global evaluation window); one group = exactly the single-model search. Future multi-item constraints (joint MOQ, shared budgets) must add a link in `independent_groups`.
 - **Cut releases** still respect batch size and MOQ (round down; below the MOQ nothing is released).
 - **BOM quantities** may be fractional (e.g. 0.2). RM shipped for a release = quantity × P rounded **up** to whole units, in exact integer arithmetic (`config.rm_units_for`, `config.max_fg_from`); whole-number BOMs give exactly the old results.
 - **Lookahead.** A candidate may not fail any cell the rule's own quantity passes; among those, the cheapest wins.
 - **Price-break round-up.** The DC order is raised to a price-break quantity (never above the cap) when that is cheaper in total (all-units production + transport tiers); `simulation.round_up_to_price_break`.
 - **Search** (`meio/search.py`, `docs/search_algorithm.md`): multi-start, coarse-to-fine block moves, restructure jumps, confirmation seeds (an accepted move may not make a cell weak there), unfixable cells may not get worse within an improve phase. Parallel evaluation (`n_workers`) must give results identical to sequential (`test_parallel_search_gives_exactly_the_sequential_result`).
-- **JSON contract.** `examples/example_input.json` (input; the app's default dataset, maintained by hand: FG1, ~4,000 units/week; the tests and `main.py` without `--input` use the smaller `build_example_input()`) and `summary.json` (output, snake_case keys) are used by a future app. Change them only on purpose, and update `meio/io_json.py`, the examples and `docs/app_integration.md` together.
+- **JSON contract.** `examples/example_input.json` (input; the app's default dataset, maintained by hand: FG1-FG3 at site S1 sharing materials, FG4 at site S2; the tests and `main.py` without `--input` use the smaller `build_example_input()`) and `summary.json` (output, snake_case keys) are used by a future app. Change them only on purpose, and update `meio/io_json.py`, the examples and `docs/app_integration.md` together.
 
 ## Style
 - Readable, master-student-level Python: plain functions and dataclasses, clear names, docstrings that explain the logic, numpy vectorised over seeds.
@@ -56,5 +57,5 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 
 ## Planned next work
 1. Search: fewer parameters (forecast-scaled levels), parallel lookahead.
-2. Several finished goods sharing raw materials; realistic holding costs (unit value × rate + storage).
+2. Multi-item constraints (joint MOQ over several products, as a link in `decompose.independent_groups`); realistic holding costs (unit value × rate + storage).
 3. Lovable frontend on top of the web API (`api.py`, deployed on Render; see `docs/app_integration.md`).

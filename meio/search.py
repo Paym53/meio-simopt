@@ -390,8 +390,15 @@ class Searcher:
         p = next(x for x in model.products if x.name == product_name)
         allowed_dc = set(dc_order_weeks(model, p))
         release_weeks = feeding_release_weeks(model, p, week)
+        pre_build = ""
         if not release_weeks:
-            return False, "no release week can still reach this week"
+            # every release week that could reach `week` is closed: pre-build in the
+            # latest open order week before them (its stock must cover this week too)
+            first = week - model.release_to_dc_max(p)
+            earlier = [r for r in allowed_dc if r < first]
+            if first < 1 or not earlier:
+                return False, "no release week can still reach this week"
+            release_weeks, pre_build = [max(earlier)], " (pre-build before closed production weeks)"
 
         # 1. raw material binding?
         short_materials = [mat for mat in p.bom
@@ -417,14 +424,14 @@ class Searcher:
                     schedule.rm_floor[mat_name] += self.step_size(max(schedule.rm_floor[mat_name], m.batch_size),
                                                                   m.batch_size, frac)
                 text = "; ".join(f"{k} weeks {v[0]}-{v[-1]}" for k, v in changed_weeks.items())
-                return True, f"RM was binding -> raised RMW (s,S) and minimum: {text}"
+                return True, f"RM was binding -> raised RMW (s,S) and minimum: {text}{pre_build}"
             return False, f"releases cut by {short_materials}, but no RM order can arrive in time"
 
         # 1b. orders limited by the policy's own cap? -> raise the cap
         cap_share = result.dc[p.name]["cut_by_policy_cap"][:, release_weeks].mean(axis=0).max()
         if cap_share > st.cut_share_threshold:
             schedule.dc_cap[p.name] += self.step_size(schedule.dc_cap[p.name], p.batch_size, frac)
-            return True, f"order cap was binding -> raised DC cap of {p.name} to {schedule.dc_cap[p.name]}"
+            return True, f"order cap was binding -> raised DC cap of {p.name} to {schedule.dc_cap[p.name]}{pre_build}"
 
         # 2. capacity binding? -> produce earlier
         capacity_share = result.dc[p.name]["cut_by_capacity"][:, release_weeks].mean(axis=0).max()
@@ -444,7 +451,7 @@ class Searcher:
             step = self.step_size(S[r], batch, frac)
             s[r] += step
             S[r] += step
-        return True, f"{text} of {p.name}: weeks {target_weeks[0]}-{target_weeks[-1]}"
+        return True, f"{text} of {p.name}: weeks {target_weeks[0]}-{target_weeks[-1]}{pre_build}"
 
     def repair(self, schedule: PolicySchedule, round_no: int, give_up_above: float = np.inf,
                fraction: float | None = None) -> Evaluation:
@@ -721,7 +728,7 @@ class Searcher:
             holdout_rounds.append(weak)
             self.record(round_no, "hold-out", "hold-out check",
                         f"{len(weak)} weak cells, margins raised", ev)
-            self.say(f"    hold-out check: {len(weak)} weak cells (hold-out mean fill < F)")
+            self.say(f"    hold-out check: {len(weak)} weak cells (hold-out share of futures meeting F < alpha)")
             if weak.empty:
                 break
             if round_no == st.max_outer_rounds:            # last round: make the raised margins count

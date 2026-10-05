@@ -90,6 +90,7 @@ class Product:
     transport_tiers: list[Tier]        # PF -> DC transport cost per unit
     lead_time_dist: dict[int, float]   # P(L~ = weeks), production start at PF -> usable at DC
     closed_production_weeks: list[int] = field(default_factory=list)
+    site: str = ""                     # production site (ModelInput.sites); "" = the default site
 
     # ----- derived quantities (read-only helpers) -----
     def max_age_for_channel(self, channel: Channel) -> int:
@@ -202,6 +203,19 @@ class InitialState:
     rm_pipeline: dict[str, list[tuple[int, int]]]
 
 
+DEFAULT_SITE = "PF"
+
+
+@dataclass
+class ProductionSite:
+    """A production facility. The products assigned to it share its weekly capacity (FG units,
+    booked in the production week); in its closed weeks none of them is produced."""
+    name: str
+    capacity: int                                          # FG units per week
+    capacity_overrides: dict[int, int] = field(default_factory=dict)   # week -> capacity
+    closed_weeks: list[int] = field(default_factory=list)
+
+
 @dataclass
 class ModelInput:
     """Complete description of the supply chain for one review."""
@@ -213,13 +227,35 @@ class ModelInput:
     production_capacity: int                   # FG units per week, shared by all products
     capacity_overrides: dict[int, int] = field(default_factory=dict)  # week -> capacity
     target_share_of_futures: float = 0.98      # alpha: every cell must meet its fill rate F in this share of futures
+    sites: list[ProductionSite] = field(default_factory=list)   # empty: one default site with
+                                                                # production_capacity / capacity_overrides
+    evaluation_start: int = 0                  # first evaluated week; 0 = automatic (global L_max + 1).
+                                               # Set for the sub-models of independent groups (decompose.py)
 
     # ----- helpers -----
     def material(self, name: str) -> Material:
         return next(m for m in self.materials if m.name == name)
 
-    def capacity_in_week(self, t: int) -> int:
-        return self.capacity_overrides.get(t, self.production_capacity)
+    def all_sites(self) -> list[ProductionSite]:
+        """The production sites; without explicit sites the single default site."""
+        if self.sites:
+            return self.sites
+        return [ProductionSite(DEFAULT_SITE, self.production_capacity, self.capacity_overrides, [])]
+
+    def site_of(self, product: Product) -> ProductionSite:
+        """The site that produces a product (the default site if no sites are given)."""
+        if not self.sites:
+            return self.all_sites()[0]
+        return next(s for s in self.sites if s.name == product.site)
+
+    def capacity_in_week(self, t: int, product: Product | None = None) -> int:
+        """Capacity of the product's site (default: the first site) in production week t."""
+        site = self.site_of(product) if product is not None else self.all_sites()[0]
+        return site.capacity_overrides.get(t, site.capacity)
+
+    def production_closed(self, product: Product, week: int) -> bool:
+        """True if the product cannot be produced in this week (its own or its site's closed weeks)."""
+        return week in product.closed_production_weeks or week in self.site_of(product).closed_weeks
 
     def products_using(self, material_name: str) -> list[Product]:
         return [p for p in self.products if material_name in p.bom]
@@ -252,8 +288,8 @@ class ModelInput:
 
     @property
     def evaluation_weeks(self) -> list[int]:
-        """Weeks in which service is evaluated: L_max + 1 ... H."""
-        return list(range(self.lead_time_max_global + 1, self.horizon + 1))
+        """Weeks in which service is evaluated: L_max + 1 ... H (or from evaluation_start)."""
+        return list(range(self.evaluation_start or self.lead_time_max_global + 1, self.horizon + 1))
 
 
 # The model uses one ordering policy (see docs/policy_choice.md):
@@ -423,7 +459,17 @@ def build_example_input(horizon: int = 36) -> ModelInput:
 def validate_input(model: ModelInput) -> None:
     """Basic consistency checks. Raises ValueError with a clear message."""
     problems = []
+    site_names = [s.name for s in model.sites]
+    if len(set(site_names)) != len(site_names):
+        problems.append("production site names must be unique")
+    for s in model.sites:
+        if s.capacity < 0 or any(c < 0 for c in s.capacity_overrides.values()):
+            problems.append(f"site {s.name}: capacity must be >= 0")
     for p in model.products:
+        if model.sites and p.site not in site_names:
+            problems.append(f"{p.name}: production site {p.site!r} is not defined (sites: {site_names})")
+        if not model.sites and p.site not in ("", DEFAULT_SITE):
+            problems.append(f"{p.name}: production site {p.site!r} given, but the input defines no sites")
         if abs(sum(p.lead_time_dist.values()) - 1) > 1e-9:
             problems.append(f"{p.name}: lead-time probabilities do not sum to 1")
         if p.moq % p.batch_size != 0:

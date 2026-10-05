@@ -394,7 +394,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
 
     # production capacity used per production week (a release of week t is produced in week
     # t + tau_p; products with different tau_p can share a production week)
-    capacity_used = np.zeros((n, H + max(tau.values()) + 2), dtype=np.int64)
+    site_of = {p.name: model.site_of(p).name for p in products}
+    capacity_used = {s.name: np.zeros((n, H + max(tau.values()) + 2), dtype=np.int64) for s in model.all_sites()}
 
     rm_stock, rm_arrivals, rm_last_arrival = {}, {}, {}
     for m in materials:
@@ -516,7 +517,8 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             for mat_name, per_unit in p.bom.items():
                 rm_limit = np.minimum(rm_limit, max_fg_from(per_unit, usable_rm[mat_name]))
             production_week = t + tau[p.name]               # all BOM materials at production: t + tau_p
-            capacity_before = model.capacity_in_week(production_week) - capacity_used[:, production_week]
+            site_used = capacity_used[site_of[p.name]]       # products at one site share its capacity
+            capacity_before = model.capacity_in_week(production_week, p) - site_used[:, production_week]
             limit = np.minimum(np.minimum(Q, rm_limit), capacity_before)
             P = round_down_to_supply_rules(limit, p.batch_size, p.moq)
             cancelled = Q - P
@@ -528,7 +530,7 @@ def simulate(model: ModelInput, schedule: PolicySchedule, scen: ScenarioSet,
             for mat_name, per_unit in p.bom.items():
                 rm_rec[mat_name]["limited_release"][:, t] |= rm_binding & (max_fg_from(per_unit, usable_rm[mat_name]) == limit)
 
-            capacity_used[:, production_week] += P
+            site_used[:, production_week] += P
             for mat_name, per_unit in p.bom.items():   # materials leave the RMW in the release week
                 m = material_by_name[mat_name]
                 shipped = rm_units_for(per_unit, P)    # per_unit x P, rounded up to whole units
