@@ -27,8 +27,10 @@ def settings_table(model: ModelInput, settings: SearchSettings, extra: dict) -> 
         ("Evaluation window", f"weeks {model.evaluation_weeks[0]}-{model.evaluation_weeks[-1]}",
          "service is only evaluated after L_max weeks"),
         ("Review period R [weeks]", 1, "every week is a review week"),
-        ("Production capacity [FG/week]", model.production_capacity, "shared by all products"),
-        ("Capacity overrides", str(model.capacity_overrides or "none"), "week -> capacity"),
+        *[(f"Production site {s.name}: capacity [FG/week]", s.capacity,
+           f"shared by {', '.join(p.name for p in model.products if model.site_of(p).name == s.name)}; "
+           f"overrides {s.capacity_overrides or 'none'}; closed weeks {s.closed_weeks or 'none'}")
+          for s in model.all_sites()],
         ("Search seeds", settings.n_search_seeds, "used to accept or reject moves"),
         ("Hold-out seeds", settings.n_holdout_seeds, "used to find weak cells"),
         ("Test seeds", settings.n_test_seeds, "untouched, used once for the final verdict"),
@@ -59,6 +61,7 @@ def products_table(model: ModelInput) -> tuple[pd.DataFrame, pd.DataFrame]:
             "waste_cost/unit": p.waste_cost, "fixed_cost/release": p.fixed_cost_per_release,
             "lead_time_min": p.lead_time_min, "lead_time_max": p.lead_time_max,
             "rmw_to_pf_lead_time (slowest BOM material)": model.rmw_to_pf_lead_time(p),
+            "production_site": model.site_of(p).name,
             "closed_production_weeks": str(p.closed_production_weeks),
         })
         priority = p.channel_priority()

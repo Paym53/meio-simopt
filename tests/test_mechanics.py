@@ -1046,3 +1046,98 @@ def test_parallel_search_gives_exactly_the_sequential_result():
     accepted = lambda out: [(r["phase"], r["action"], r["mean_cost"]) for r in out.search_log
                             if r["phase"] in ("improve", "race", "restructure")]
     assert accepted(seq) == accepted(par)
+
+
+# ---------------------------------------------------------------------------
+# Several products: production sites and independent groups
+# ---------------------------------------------------------------------------
+def _sites_model(site_of_f2: str):
+    """F1 (material A) at site S1, F2 (material B) at site_of_f2; S1 has 100 units in week 2."""
+    from dataclasses import replace
+    from meio.config import ProductionSite
+    model = _two_product_model(capacity_week_2=1000)
+    products = [replace(model.products[0], site="S1"), replace(model.products[1], site=site_of_f2)]
+    sites = [ProductionSite("S1", 1000, {2: 100}), ProductionSite("S2", 1000, {}, [3])]
+    return replace(model, products=products, sites=sites, production_capacity=0, capacity_overrides={})
+
+
+def test_products_share_the_capacity_of_their_own_site_only():
+    from meio.policy import dc_order_weeks
+    shared, separate = _sites_model("S1"), _sites_model("S2")
+    for model in (shared, separate):
+        assert model.capacity_in_week(2, model.products[0]) == 100
+    assert separate.capacity_in_week(2, separate.products[1]) == 1000
+    # the site's closed week 3 applies to F2 at S2 only (tau of F2 is 0: release week = production week)
+    assert 3 not in dc_order_weeks(separate, separate.products[1])
+    assert 3 in dc_order_weeks(shared, shared.products[1])
+
+    H = shared.horizon
+    def run(model):
+        sched = PolicySchedule(dc_s={"F1": np.full(H + 1, 400), "F2": np.full(H + 1, 400)},
+                               dc_S={"F1": np.full(H + 1, 400), "F2": np.full(H + 1, 400)},
+                               rm_s={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
+                               rm_S={"A": np.zeros(H + 1, int), "B": np.zeros(H + 1, int)},
+                               dc_cap={"F1": 1000, "F2": 1000}, rm_floor={"A": 0, "B": 0})
+        return simulate(model, sched, build_scenarios(model, 3, 1, "t"))
+    # F1 (tau 1) released in week 1 is produced in week 2 at S1 (capacity 100) -> at most 100
+    r_shared, r_separate = run(shared), run(separate)
+    assert r_shared.dc["F1"]["released_P"][0, 1] <= 100
+    # F2 (tau 0) released in week 2 is produced in week 2: at S1 it gets what F1 left of the 100,
+    # at S2 it has its own 1000 units
+    assert r_shared.dc["F2"]["released_P"][0, 2] + r_shared.dc["F1"]["released_P"][0, 1] <= 100
+    assert r_separate.dc["F2"]["released_P"][0, 2] > 100
+
+
+def test_independent_groups_follow_shared_sites_and_materials():
+    from meio.decompose import independent_groups, sub_model
+    shared, separate = _sites_model("S1"), _sites_model("S2")
+    assert independent_groups(shared) == [["F1", "F2"]]        # same site
+    assert independent_groups(separate) == [["F1"], ["F2"]]    # own site, own material
+    from dataclasses import replace
+    chained = replace(separate, products=[separate.products[0],
+                                          replace(separate.products[1], bom={"A": 1, "B": 1})])
+    assert independent_groups(chained) == [["F1", "F2"]]       # shared material A
+    sub = sub_model(separate, ["F2"])
+    assert [p.name for p in sub.products] == ["F2"] and [m.name for m in sub.materials] == ["B"]
+    assert [s.name for s in sub.sites] == ["S2"]
+    assert sub.evaluation_weeks == separate.evaluation_weeks   # same evaluation window as the whole
+    assert set(sub.demand.mean) == {("F2", "Only")} and set(sub.initial_state.rm_stock) == {"B"}
+
+
+def test_example_has_two_independent_groups_and_one_group_optimises_like_before():
+    from meio.decompose import independent_groups, optimise
+    from meio.io_json import load_model
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "example_input.json")
+    model = load_model(path)
+    assert independent_groups(model) == [["FG1", "FG2", "FG3"], ["FG4"]]
+    # a single group runs the Searcher on the full model with the given seeds: same outcome
+    from meio.search import Searcher
+    small = build_example_input(horizon=16)
+    settings = SearchSettings(n_search_seeds=30, n_holdout_seeds=30, n_quantile_samples=300,
+                              max_improve_passes=1, max_outer_rounds=1, n_workers=1)
+    seeds = build_scenarios(small, 30, 1, "s"), build_scenarios(small, 30, 2, "h")
+    direct = Searcher(small, settings, *seeds, verbose=False).run()
+    via, groups = optimise(small, settings, *seeds, verbose=False)
+    assert groups == [["FG1"]] and via.last_search_eval.cost == direct.last_search_eval.cost
+
+
+def test_sites_in_json_and_validation():
+    import json
+    from dataclasses import replace
+    from meio.config import validate_input
+    from meio.io_json import model_from_dict, model_to_dict
+    model = _sites_model("S2")
+    again = model_from_dict(json.loads(json.dumps(model_to_dict(model))))
+    assert [(s.name, s.capacity, s.capacity_overrides, s.closed_weeks) for s in again.sites] == \
+           [("S1", 1000, {2: 100}, []), ("S2", 1000, {}, [3])]
+    assert [p.site for p in again.products] == ["S1", "S2"]
+    validate_input(again)
+    bad = replace(model, products=[replace(model.products[0], site="S9"), model.products[1]])
+    try:
+        validate_input(bad)
+    except ValueError as exc:
+        assert "S9" in str(exc)
+    else:
+        raise AssertionError("unknown site accepted")
+    no_sites = model_to_dict(build_example_input())
+    assert "sites" not in no_sites and model_from_dict(no_sites).all_sites()[0].capacity == 450

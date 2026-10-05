@@ -38,7 +38,7 @@ from meio.io_json import (build_summary, load_model, model_to_dict, policy_dict,
 from meio.lookahead import lookahead_week1
 from meio.policy import PolicySchedule, committed_decisions
 from meio.scenarios import ScenarioSet, build_scenarios
-from meio.search import Searcher
+from meio.decompose import optimise
 from meio.simulation import simulate
 
 
@@ -78,7 +78,7 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
     # 3. tune the (s,S) schedule
     print(f"\nPolicy: {POLICY_NAME}")
     print("Tuning the (s,S) schedule ...")
-    outcome = Searcher(model, settings, search_seeds, holdout_seeds).run()
+    outcome, groups = optimise(model, settings, search_seeds, holdout_seeds)
 
     # 4. choose the committed week-1 orders by simulated lookahead
     print("Week-1 lookahead ...")
@@ -125,6 +125,7 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
         "mean cost final schedule (search seeds)": round(outcome.last_search_eval.cost),
         "mean cost over horizon (test seeds)": round(test_result.mean_total_cost()),
         "test cells passing": f"{int(cells['test_pass'].sum())} / {len(cells)}",
+        "independent groups": " | ".join(", ".join(g) for g in groups),
     }
     for name, cap in outcome.schedule.dc_cap.items():
         run_info[f"DC order cap {name}"] = cap

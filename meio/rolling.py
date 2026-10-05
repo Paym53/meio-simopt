@@ -62,9 +62,11 @@ def shift_model_one_week(model: ModelInput, new_state: InitialState) -> ModelInp
     materials = [replace(m, closed_order_weeks=[w - 1 for w in m.closed_order_weeks if w > 1])
                  for m in model.materials]
     overrides = {w - 1: c for w, c in model.capacity_overrides.items() if w > 1}
+    sites = [replace(s, capacity_overrides={w - 1: c for w, c in s.capacity_overrides.items() if w > 1},
+                     closed_weeks=[w - 1 for w in s.closed_weeks if w > 1]) for s in model.sites]
     return replace(model, products=products, materials=materials,
                    demand=DemandForecast(mean=mean, sd=sd), initial_state=new_state,
-                   capacity_overrides=overrides)
+                   capacity_overrides=overrides, sites=sites)
 
 
 def shift_schedule(old: PolicySchedule, old_model: ModelInput, new_model: ModelInput,

@@ -17,13 +17,16 @@ Input format (all weeks are numbered from 1 = current review week):
   "horizon": 36,
   "production_capacity": 450,
   "capacity_overrides": {"18": 0},                           # optional: week -> capacity
+  "sites": [{name, capacity, capacity_overrides: {...}, closed_weeks: [...]}],   # optional: production
+                                       # sites; then every product names its "site" and production_capacity
+                                       # / capacity_overrides above are not used
   "target_share_of_futures": 0.98,                           # optional: every cell must meet its fill
                                                              # rate F in at least this share of futures
   "products": [ {name, shelf_life, channels: [{name, min_remaining_life, target_fill_rate}],
                  bom: {material: units per FG, whole or fractional e.g. 0.2}, batch_size, moq, holding_cost, waste_cost,
                  fixed_cost_per_release, production_tiers: [{lower, upper, unit_cost}],
                  transport_tiers: [...], lead_time_dist: {"weeks": probability},
-                 closed_production_weeks: [...]} ],
+                 closed_production_weeks: [...], site: "S1" (with "sites")} ],
   "materials": [ {name, shelf_life, min_life_at_shipment, batch_size, moq, unit_cost,
                   fixed_order_cost, holding_cost, waste_cost, transport_cost,
                   lead_time_dist: {"weeks": probability}, supplier_capacity, closed_order_weeks,
@@ -44,7 +47,7 @@ from dataclasses import asdict
 import numpy as np
 import pandas as pd
 
-from .config import (Channel, DemandForecast, InitialState, Material, ModelInput, Product, Tier,
+from .config import (Channel, DemandForecast, InitialState, Material, ModelInput, Product, ProductionSite, Tier,
                      build_example_input)
 
 
@@ -76,6 +79,9 @@ def model_to_dict(model: ModelInput) -> dict:
         "production_capacity": model.production_capacity,
         "capacity_overrides": {str(k): v for k, v in model.capacity_overrides.items()},
         "target_share_of_futures": model.target_share_of_futures,
+        **({"sites": [{"name": s.name, "capacity": s.capacity,
+                       "capacity_overrides": {str(k): v for k, v in s.capacity_overrides.items()},
+                       "closed_weeks": list(s.closed_weeks)} for s in model.sites]} if model.sites else {}),
         "products": products,
         "materials": materials,
         "demand_forecast": forecast,
@@ -110,6 +116,7 @@ def model_from_dict(d: dict) -> ModelInput:
             transport_tiers=[Tier(**t) for t in p["transport_tiers"]],
             lead_time_dist=dist(p["lead_time_dist"]),
             closed_production_weeks=list(p.get("closed_production_weeks", [])),
+            site=p.get("site", ""),
         ))
     materials = []
     for m in d["materials"]:
@@ -138,9 +145,14 @@ def model_from_dict(d: dict) -> ModelInput:
     )
     return ModelInput(horizon=d["horizon"], products=products, materials=materials,
                       demand=DemandForecast(mean=mean, sd=sd), initial_state=state,
-                      production_capacity=d["production_capacity"],
+                      production_capacity=d.get("production_capacity", 0),
                       capacity_overrides={int(k): int(v) for k, v in d.get("capacity_overrides", {}).items()},
-                      target_share_of_futures=float(d.get("target_share_of_futures", 0.98)))
+                      target_share_of_futures=float(d.get("target_share_of_futures", 0.98)),
+                      sites=[ProductionSite(name=s["name"], capacity=int(s["capacity"]),
+                                            capacity_overrides={int(k): int(v) for k, v in
+                                                                s.get("capacity_overrides", {}).items()},
+                                            closed_weeks=[int(w) for w in s.get("closed_weeks", [])])
+                             for s in d.get("sites", [])])
 
 
 def save_json(data: dict, path: str) -> None:

@@ -46,7 +46,7 @@ def dc_order_weeks(model: ModelInput, product: Product) -> list[int]:
     week t + tau_p and the earliest possible arrival (t + tau_p + L_min) still inside the horizon."""
     last = model.horizon - model.release_to_dc_min(product)
     return [t for t in range(1, last + 1)
-            if model.production_week(product, t) not in product.closed_production_weeks]
+            if not model.production_closed(product, model.production_week(product, t))]
 
 
 def feeding_release_weeks(model: ModelInput, product: Product, week: int) -> list[int]:
@@ -197,7 +197,7 @@ def price_break_lots(model: ModelInput, product: Product) -> list[int]:
     lots = set()
     for tier in product.production_tiers[1:] + product.transport_tiers[1:]:
         lot = _round_up(tier.lower, product.batch_size)
-        if product.moq < lot <= model.production_capacity and lot <= longest * mean_weekly:
+        if product.moq < lot <= model.site_of(product).capacity and lot <= longest * mean_weekly:
             lots.add(lot)
     return sorted(lots)
 
