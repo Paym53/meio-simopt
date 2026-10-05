@@ -35,7 +35,7 @@ Python engine  +  (later) small web API    React frontend + Supabase (tables, au
 | `decisions_to_commit` | One row per decision: `position`, `expected_waste`, `effective_position`, `reorder_level_s`, `order_up_to_level_S`, `rule_quantity`, `committed_quantity`, `note` |
 | `service` | `by_channel` (cells passing, worst week), `failed_cells`, `all_cells_pass` |
 | `costs` | Cost components (mean, share, P5, P95, SE) |
-| `kpis` | Pooled fill rates, waste, cancellations, stock levels, bullwhip ratio per stage (production releases, supplier orders: variance across seeds of the order totals / of the demand totals they serve; about 1 = demand uncertainty passed on one-to-one, above 1 = amplified) |
+| `kpis` | Pooled fill rates, waste, cancellations, stock levels |
 | `policy` | Optimised s and S per week for the DC and the RMW, order cap, RMW minimums |
 | `weekly_means_test_seeds` | Mean flows, positions and costs per week |
 | `meta` *(v2)* | `summary_version` (2), `products`, `materials`, `channels` per product, `horizon`, `weeks`, `evaluation_weeks {first, last}`, `commit_week` (1) |

@@ -958,26 +958,12 @@ def test_search_keeps_the_best_start_and_never_ends_worse_than_its_repaired_star
     assert all(r["feasible"] for r in out.search_log if r["phase"] == "improve")
     chosen_rows = [r for r in start_rows if r["action"] == out.chosen_start]
     assert len(chosen_rows) == 1
-
-
-def test_bullwhip_ratio_hand_examples():
-    from meio.tables import bullwhip_ratio
-    rng = np.random.default_rng(0)
-    demand = np.zeros((400, 30))
-    demand[:, 1:] = rng.normal(100, 20, (400, 29))
-    weeks = list(range(1, 25))
-    assert abs(bullwhip_ratio(demand, demand, weeks, 0) - 1) < 1e-12        # orders = demand
-    assert abs(bullwhip_ratio(2 * demand, demand, weeks, 0) - 4) < 1e-12    # amplified x 2
-    lumpy = np.zeros_like(demand)                                            # the same totals in
-    for start in range(1, 25, 4):                                            # lots every 4 weeks:
-        lumpy[:, start] = demand[:, start:start + 4].sum(axis=1)              # no bullwhip
-    assert abs(bullwhip_ratio(lumpy, demand, weeks, 0) - 1) < 1e-9
-    steady = np.full_like(demand, 100.0)                                     # ignores demand: 0
-    assert bullwhip_ratio(steady, demand, weeks, 0) == 0
-    shifted = np.zeros_like(demand)                                          # orders 3 weeks ahead
-    shifted[:, 1:26] = demand[:, 4:29]                                       # of the demand they
-    assert abs(bullwhip_ratio(shifted, demand, weeks, 3) - 1) < 1e-12       # serve
-    assert bullwhip_ratio(demand, demand, [1], 0) is None                   # too few weeks
+    # the reported baseline is always the simple heuristic (s,S): the classic quantile start
+    classic = initial_schedule(s.model, s.settings)
+    for name in ("dc_s", "dc_S", "rm_s", "rm_S"):
+        a, b = getattr(out.start_schedule, name), getattr(classic, name)
+        assert all(np.array_equal(a[k], b[k]) for k in a)
+    assert out.start_schedule.dc_cap == classic.dc_cap and out.start_schedule.rm_floor == classic.rm_floor
 
 
 def test_confirmation_seeds_reject_a_move_that_makes_a_cell_weak():

@@ -41,7 +41,7 @@ lots), and the **coordinated echelon move** that changes the DC lot together wit
 (s,S) of the weeks that feed those releases (BOM × the same step). An accepted move is repeated
 in the same direction while it pays off; the step halves after every pass; move types that found
 nothing at a level are skipped in the next pass. Whole-block moves keep the levels following the
-forecast, so orders do not become nervous (no bullwhip from erratic levels).
+forecast, so orders do not become nervous through erratic week-to-week levels.
 
 **Restructure (iterated local search).** After the first improve phase, per product and price
 break above its current typical lot: set every lot to the break (cap included), raise the
@@ -71,18 +71,6 @@ With all-units discounts a slightly larger order can be cheaper in total (defaul
 the price-break quantity with the lowest total production + transport cost, never above the
 order cap. No parameters; without discount bands nothing changes.
 
-## 5. Bullwhip
-
-The KPI table reports a **bullwhip ratio** per stage (production releases, supplier orders): how
-strongly the stage's orders react to demand uncertainty. Per seed, the orders over the whole order
-window are summed, and so is the demand they serve (FG equivalents, shifted by the median lead
-time); the ratio is the variance of the order totals across seeds divided by the variance of the
-demand totals. Totals remove the lumpiness of lot sizing (lots of 10,000 units are not
-"bullwhip"); what remains is amplification of demand uncertainty. About 1 = passed on
-one-to-one, clearly above 1 = bullwhip. (Variance of weekly orders would mostly measure lot
-sizes: a policy with economic lots would always look "nervous".) The RMW policy works on the echelon position (RM at the RMW, on
-order and already inside FG), so it reacts to end-customer demand, not to the lumpy releases.
-
-## 6. Benchmark
+## 5. Benchmark
 
 See the pull request and `README.md` for the before/after comparison on eight instances.

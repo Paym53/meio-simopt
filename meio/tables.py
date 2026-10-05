@@ -209,25 +209,6 @@ def cost_table(result: SimResult) -> pd.DataFrame:
     return df
 
 
-def bullwhip_ratio(orders: np.ndarray, demand: np.ndarray, order_weeks: list[int], shift: int) -> float | None:
-    """Bullwhip ratio of one stage: how strongly its orders react to demand uncertainty.
-
-    orders, demand: (n_seeds, H + 1) arrays (FG equivalents). Per seed, the orders placed in
-    order_weeks are summed and so is the demand they are meant for (`shift` weeks later, the
-    median time until an order is available for sale). The ratio is the variance of the order
-    totals across seeds divided by the variance of the demand totals. Totals over the whole
-    order window remove the lumpiness of lot sizing (when a lot is placed); what remains is
-    how much of the demand uncertainty the stage passes on. About 1 = passed on one-to-one,
-    clearly above 1 = amplified (bullwhip), below 1 = dampened. None without variation."""
-    weeks = np.asarray([t for t in order_weeks if t + shift < demand.shape[1]])
-    if len(weeks) < 2:
-        return None
-    var_d = demand[:, weeks + shift].sum(axis=1).var(ddof=1)
-    if not var_d > 0:
-        return None
-    return float(orders[:, weeks].sum(axis=1).var(ddof=1) / var_d)
-
-
 def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
     weeks = model.evaluation_weeks
     rows = []
@@ -249,24 +230,12 @@ def kpi_table(model: ModelInput, result: SimResult) -> pd.DataFrame:
                      dc["cut_by_capacity"][:, 1:][order_weeks].sum() / n_orders if n_orders else None, ""))
         rows.append((f"{p.name}: average DC stock end of week", dc["on_hand_end"][:, 1:].mean(), "units"))
         rows.append((f"{p.name}: releases per seed", (dc["released_P"][:, 1:] > 0).sum(axis=1).mean(), ""))
-        rows.append((f"{p.name}: bullwhip ratio of production releases",
-                     bullwhip_ratio(dc["released_P"], dc["demand"], dc_order_weeks(model, p),
-                                    model.release_to_dc_median(p)),
-                     "variance (across seeds) of total releases / of the total demand they serve; "
-                     "about 1 = demand uncertainty passed on one-to-one, above 1 = amplified"))
     for m in model.materials:
         rm = result.rm[m.name]
         receipts = rm["receipts"][:, 1:].sum()
         rows.append((f"{m.name}: average RMW stock end of week", rm["on_hand_end"][:, 1:].mean(), "units"))
         rows.append((f"{m.name}: RM waste as share of receipts", rm["waste"][:, 1:].sum() / receipts if receipts else None, ""))
         rows.append((f"{m.name}: supplier orders per seed", (rm["ordered_O"][:, 1:] > 0).sum(axis=1).mean(), ""))
-        users = model.products_using(m.name)
-        need = sum(p.bom[m.name] * result.dc[p.name]["demand"] for p in users)
-        shift = m.lead_time_median + min(model.release_to_dc_median(p) for p in users)
-        rows.append((f"{m.name}: bullwhip ratio of supplier orders",
-                     bullwhip_ratio(rm["ordered_O"], need, rm_order_weeks(model, m), shift),
-                     "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) "
-                     "they serve; about 1 = passed on one-to-one, above 1 = amplified"))
     return pd.DataFrame(rows, columns=["KPI", "value", "note"])
 
 

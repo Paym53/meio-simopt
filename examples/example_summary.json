@@ -1,12 +1,12 @@
 {
   "run": {
     "run_folder": "output/example_quick",
-    "timestamp": "2026-10-05 09:46:46",
+    "timestamp": "2026-10-05 09:58:40",
     "policy": "age-aware capped (s,S) + week-1 lookahead",
     "preset": "quick",
     "seeds_search_hold_out_test": "200 / 1000 / 2000",
     "simulated_schedules_search_evaluations": 1459,
-    "runtime_search_lookahead_s": 69.5,
+    "runtime_search_lookahead_s": 60.9,
     "search_feasible_at_the_end": true,
     "cells_declared_unfixable_during_search": 0,
     "mean_cost_start_schedule_search_seeds": 460678,
@@ -839,11 +839,6 @@
       "note": ""
     },
     {
-      "kpi": "FG1: bullwhip ratio of production releases",
-      "value": 0.8565780619670957,
-      "note": "variance (across seeds) of total releases / of the total demand they serve; about 1 = demand uncertainty passed on one-to-one, above 1 = amplified"
-    },
-    {
       "kpi": "RM_A: average RMW stock end of week",
       "value": 3031.54625,
       "note": "units"
@@ -857,11 +852,6 @@
       "kpi": "RM_A: supplier orders per seed",
       "value": 1.0,
       "note": ""
-    },
-    {
-      "kpi": "RM_A: bullwhip ratio of supplier orders",
-      "value": 0.022577668777855383,
-      "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
     },
     {
       "kpi": "RM_B: average RMW stock end of week",
@@ -879,11 +869,6 @@
       "note": ""
     },
     {
-      "kpi": "RM_B: bullwhip ratio of supplier orders",
-      "value": 0.06178513465372968,
-      "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
-    },
-    {
       "kpi": "RM_C: average RMW stock end of week",
       "value": 4859.460416666667,
       "note": "units"
@@ -899,11 +884,6 @@
       "note": ""
     },
     {
-      "kpi": "RM_C: bullwhip ratio of supplier orders",
-      "value": 0.27444133870624754,
-      "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
-    },
-    {
       "kpi": "RM_D: average RMW stock end of week",
       "value": 12634.752083333333,
       "note": "units"
@@ -917,11 +897,6 @@
       "kpi": "RM_D: supplier orders per seed",
       "value": 3.0,
       "note": ""
-    },
-    {
-      "kpi": "RM_D: bullwhip ratio of supplier orders",
-      "value": 0.0,
-      "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
     }
   ],
   "policy": {
@@ -20135,11 +20110,6 @@
         "note": ""
       },
       {
-        "kpi": "FG1: bullwhip ratio of production releases",
-        "value": 0.669543816704191,
-        "note": "variance (across seeds) of total releases / of the total demand they serve; about 1 = demand uncertainty passed on one-to-one, above 1 = amplified"
-      },
-      {
         "kpi": "RM_A: average RMW stock end of week",
         "value": 4091.1354166666665,
         "note": "units"
@@ -20153,11 +20123,6 @@
         "kpi": "RM_A: supplier orders per seed",
         "value": 1.8985,
         "note": ""
-      },
-      {
-        "kpi": "RM_A: bullwhip ratio of supplier orders",
-        "value": 6.622014368757904,
-        "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
       },
       {
         "kpi": "RM_B: average RMW stock end of week",
@@ -20175,11 +20140,6 @@
         "note": ""
       },
       {
-        "kpi": "RM_B: bullwhip ratio of supplier orders",
-        "value": 0.9033597614197502,
-        "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
-      },
-      {
         "kpi": "RM_C: average RMW stock end of week",
         "value": 7553.160416666667,
         "note": "units"
@@ -20195,11 +20155,6 @@
         "note": ""
       },
       {
-        "kpi": "RM_C: bullwhip ratio of supplier orders",
-        "value": 2.2318923527159242,
-        "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
-      },
-      {
         "kpi": "RM_D: average RMW stock end of week",
         "value": 13688.410416666668,
         "note": "units"
@@ -20213,11 +20168,6 @@
         "kpi": "RM_D: supplier orders per seed",
         "value": 3.046,
         "note": ""
-      },
-      {
-        "kpi": "RM_D: bullwhip ratio of supplier orders",
-        "value": 3.684770883366046,
-        "note": "variance (across seeds) of total supplier orders / of the total RM need (BOM x demand) they serve; about 1 = passed on one-to-one, above 1 = amplified"
       }
     ]
   },
