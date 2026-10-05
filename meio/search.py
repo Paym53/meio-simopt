@@ -372,7 +372,7 @@ class Searcher:
     # A. Repair
     # ------------------------------------------------------------------
     def raise_levels_for_cell(self, schedule: PolicySchedule, result: SimResult,
-                              product_name: str, week: int) -> tuple[bool, str]:
+                              product_name: str, week: int, fraction: float | None = None) -> tuple[bool, str]:
         """Raise the levels that feed `week`. Changes schedule in place.
         Returns (changed, description).
 
@@ -386,6 +386,7 @@ class Searcher:
           3. otherwise -> raise the DC levels in the feeding release weeks
         """
         model, st = self.model, self.settings
+        frac = fraction or st.step_fraction
         p = next(x for x in model.products if x.name == product_name)
         allowed_dc = set(dc_order_weeks(model, p))
         release_weeks = feeding_release_weeks(model, p, week)
@@ -405,7 +406,7 @@ class Searcher:
                                 for o in range(r - m.lead_time_max, r - m.lead_time_min + 1) if o in allowed})
                 s, S, batch = self.levels(schedule, "RM", mat_name)
                 for o in weeks:
-                    step = self.step_size(S[o], batch, st.step_fraction)
+                    step = self.step_size(S[o], batch, frac)
                     s[o] += step
                     S[o] += step
                 if weeks:
@@ -414,7 +415,7 @@ class Searcher:
                 for mat_name in changed_weeks:           # also raise the physical minimum
                     m = model.material(mat_name)
                     schedule.rm_floor[mat_name] += self.step_size(max(schedule.rm_floor[mat_name], m.batch_size),
-                                                                  m.batch_size, st.step_fraction)
+                                                                  m.batch_size, frac)
                 text = "; ".join(f"{k} weeks {v[0]}-{v[-1]}" for k, v in changed_weeks.items())
                 return True, f"RM was binding -> raised RMW (s,S) and minimum: {text}"
             return False, f"releases cut by {short_materials}, but no RM order can arrive in time"
@@ -422,7 +423,7 @@ class Searcher:
         # 1b. orders limited by the policy's own cap? -> raise the cap
         cap_share = result.dc[p.name]["cut_by_policy_cap"][:, release_weeks].mean(axis=0).max()
         if cap_share > st.cut_share_threshold:
-            schedule.dc_cap[p.name] += self.step_size(schedule.dc_cap[p.name], p.batch_size, st.step_fraction)
+            schedule.dc_cap[p.name] += self.step_size(schedule.dc_cap[p.name], p.batch_size, frac)
             return True, f"order cap was binding -> raised DC cap of {p.name} to {schedule.dc_cap[p.name]}"
 
         # 2. capacity binding? -> produce earlier
@@ -440,12 +441,13 @@ class Searcher:
 
         s, S, batch = self.levels(schedule, "DC", p.name)
         for r in target_weeks:
-            step = self.step_size(S[r], batch, st.step_fraction)
+            step = self.step_size(S[r], batch, frac)
             s[r] += step
             S[r] += step
         return True, f"{text} of {p.name}: weeks {target_weeks[0]}-{target_weeks[-1]}"
 
-    def repair(self, schedule: PolicySchedule, round_no: int, give_up_above: float = np.inf) -> Evaluation:
+    def repair(self, schedule: PolicySchedule, round_no: int, give_up_above: float = np.inf,
+               fraction: float | None = None) -> Evaluation:
         """Raise levels until every cell passes the search rule. A cell that shows no
         progress for `repair_patience` steps is declared unfixable; the level increases
         made for it since its last progress are undone, so they do not inflate the schedule.
@@ -481,7 +483,7 @@ class Searcher:
                             f"{key}: no progress in {st.repair_patience} steps, raises undone", ev)
                 continue
 
-            changed, text = self.raise_levels_for_cell(schedule, ev.result, key[0], key[2])
+            changed, text = self.raise_levels_for_cell(schedule, ev.result, key[0], key[2], fraction)
             if not changed:
                 self.unfixable.add(key)
                 ev = self.evaluate(schedule)
@@ -700,7 +702,8 @@ class Searcher:
         holdout_rounds, hold_cells = [], None
         for round_no in range(1, st.max_outer_rounds + 1):
             self.say(f"  round {round_no}")
-            ev = self.repair(schedule, round_no)
+            # after a hold-out check the repair is a small correction (margins of ~0.5 pp): finer steps
+            ev = self.repair(schedule, round_no, fraction=None if round_no == 1 else st.step_fraction / 4)
             schedule = ev.schedule
             self.say(f"    repair: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
                      f"unfixable cells so far {len(self.unfixable)}")
@@ -722,7 +725,7 @@ class Searcher:
             if weak.empty:
                 break
             if round_no == st.max_outer_rounds:            # last round: make the raised margins count
-                ev = self.repair(schedule, round_no + 1)
+                ev = self.repair(schedule, round_no + 1, fraction=st.step_fraction / 4)
                 ev = self.improve(ev, round_no + 1, n_passes=1, fraction=st.step_fraction / 2)
                 schedule = ev.schedule
                 self.say(f"    max rounds reached - final repair + improve with the raised margins: "
