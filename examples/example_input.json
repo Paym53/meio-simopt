@@ -2,6 +2,7 @@
   "horizon": 24,
   "production_capacity": 20000,
   "capacity_overrides": {},
+  "target_share_of_futures": 0.98,
   "products": [
     {
       "name": "FG1",
