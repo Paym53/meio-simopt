@@ -530,3 +530,13 @@ overrides" view once actuals are uploaded.
 > site capacity use per week (sum of released production of its products vs capacity), and show
 > the independent groups from `summary.meta.independent_groups` in the explainability tab
 > ("optimised separately because they share no site or material").
+
+**Phase 9 - What the search tuned (explainability).**
+> In the explainability tab add a section "What the optimiser tunes": per item a card with the
+> parameters from `summary.policy.parameters` (safety factor z, lot cover in weeks, minimum lot,
+> order cap in weeks, end-of-horizon shift for products; z, cover, minimum stock in weeks and the
+> end shift for materials) with one-line explanations, and the sentence "The weekly s and S levels
+> follow from these parameters and the demand forecast: s covers the demand over the lead time at
+> the safety factor's quantile, S adds a lot of the given weeks of forecast." Show
+> `n_parameters` next to the number of weekly levels (2 per item and order week) to make the
+> reduction visible.

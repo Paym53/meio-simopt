@@ -21,7 +21,7 @@ from meio.config import build_example_input, settings_for_preset, validate_input
 from meio.excel_export import write_workbook
 from meio.lookahead import lookahead_week1
 from meio.policy import committed_decisions
-from meio.rolling import shift_model_one_week, shift_schedule, state_after_week_one
+from meio.rolling import shift_model_one_week, state_after_week_one
 from meio.scenarios import build_scenarios
 from meio.search import Searcher
 from meio.simulation import simulate
@@ -35,18 +35,16 @@ def main() -> None:
 
     settings = settings_for_preset("quick")
     model = build_example_input()
-    warm_start, previous_model = None, None
+    warm_start = None          # the parameters of the last review: horizon-free, so no shifting needed
     review_rows, decision_rows, state_rows = [], [], []
 
     for review in range(1, args.weeks + 1):
         validate_input(model)
         print(f"\n===== Review week {review} =====")
-        if warm_start is not None:
-            warm_start = shift_schedule(warm_start, previous_model, model, settings)
 
         search = build_scenarios(model, settings.n_search_seeds, settings.base_seed + 1 + 100 * review, "search")
         holdout = build_scenarios(model, settings.n_holdout_seeds, settings.base_seed + 2 + 100 * review, "hold-out")
-        outcome = Searcher(model, settings, search, holdout, start_schedule=warm_start).run()
+        outcome = Searcher(model, settings, search, holdout, start_values=warm_start).run()
         orders, rule_orders, _ = lookahead_week1(model, outcome.schedule, search, settings,
                                                  outcome.margins, outcome.unfixable)
 
@@ -80,9 +78,8 @@ def main() -> None:
                                "on hand by age": str(ages), "total": sum(ages.values()),
                                "open orders (order week, qty)": str(new_state.rm_pipeline[name])})
 
-        previous_model = model
         model = shift_model_one_week(model, new_state)
-        warm_start = outcome.schedule
+        warm_start = outcome.parameters
 
     summary = pd.DataFrame(review_rows)
     print("\n===== Rolling summary =====")
