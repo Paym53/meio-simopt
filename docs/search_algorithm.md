@@ -125,7 +125,30 @@ one's parameters (`Searcher(start_values=...)`, `rolling_demo.py`) without shift
 
 ## 3. Benchmark (quick preset, same seeds; cost and failing cells on 2,000 test futures)
 
-See the pull request and `README.md` for the current numbers.
+Quick preset, every instance alone with 3 worker processes (the app's setting), same seeds for
+both searches. Cost = mean total cost over the horizon on 2,000 test futures (with the week-1
+lookahead); failing cells = cells below α on those futures; time = search + lookahead.
+
+| Instance | v2 cost | v3 cost | Δ cost | failing cells v2 → v3 | worst cell v2 → v3 | time v2 → v3 |
+|---|---:|---:|---:|---|---|---|
+| D0 one FG (old default) | 384,507 | 365,003 | −5.1 % | 0 → 0 | 99.3 → 98.7 % | 76 → 56 s |
+| D1 D0 + random lead times | 397,319 | 381,224 | −4.1 % | 6 → 6 | 81.8 → 81.8 % | 117 → 111 s |
+| D2 D0, demand sd × 1.6 | 437,352 | 395,327 | −9.6 % | 0 → 0 | 98.8 → 98.2 % | 58 → 110 s |
+| B0 built-in (36 weeks) | 45,946 | 32,144 | −30.0 % | 0 → 1 | 98.3 → 97.9 % | 147 → 97 s |
+| B1 B0, shelf life 10 | 72,567 | 69,466 | −4.3 % | 27 → 30 | 65.9 → 56.2 % | 344 → 188 s |
+| B2 B0, sd × 1.6 | 66,014 | 35,457 | −46.3 % | 2 → 1 | 97.4 → 97.8 % | 109 → 109 s |
+| B3 B0, large lots | 40,450 | 34,693 | −14.2 % | 0 → 0 | 98.9 → 98.8 % | 84 → 109 s |
+| B4 B0, long random lead times | 55,240 | 46,371 | −16.1 % | 28 → 25 | 75.4 → 93.9 % | 405 → 252 s |
+| M0 four FG (app default) | 1,226,828 | 1,180,311 | −3.8 % | 1 → 2 | 97.4 → 96.8 % | 896 → 430 s |
+| M1 M0, sd × 1.3 | 1,222,488 | 1,239,670 | +1.4 % | 2 → 0 | 96.5 → 98.3 % | 787 → 401 s |
+
+Total time 3,024 s → 1,863 s (−38 %); the four-product default runs about twice as fast. Cost is
+lower on 9 of 10 instances (M1: +1.4 % with two more cells passing). B1 and B4 have many cells no
+policy can serve (short shelf life, long lead times); v3 keeps far more service on B4 and is a
+little weaker on B1. The single misses on B0 and M0 are cells the search could not fix within
+the quick preset's two hold-out rounds (97–98 %); `standard` and `full` use more seeds and rounds.
+Slower than v2: D2 and B3 (single product, short runs), where the repaired large moves and the
+marginal-analysis repair cost more simulations than v2's single-direction raises.
 
 ## References
 
