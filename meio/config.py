@@ -323,14 +323,18 @@ class SearchSettings:
     base_seed: int = 2026            # all random numbers derive from this
     trace_seeds: list[int] = field(default_factory=lambda: [0, 1, 2])  # test seeds shown in detail
     initial_cap_weeks: float = 2.0     # start value of the DC order cap: weeks of mean demand
-    initial_floor_share: float = 1.0   # start value of the RMW minimum: share of mean use over the median supplier lead time
+    initial_floor_share: float = 1.0   # baseline RMW minimum: share of mean use over the median supplier lead time
     lookahead_rm_steps: int = 4        # lookahead: RM candidates = rule quantity +/- up to this many steps
-    max_starts: int = 5                # multi-start: quantile, economic-lot and price-break starts (policy.start_schedules)
-    max_move_repeats: int = 8          # improve: repeat an accepted move in the same direction up to this often
-    race_levels: int = 2               # multi-start: coarse block levels of the racing pass per start (0 = no racing)
+    max_starts: int = 5                # multi-start: classic, economic-lot and price-break starts (Searcher.starts)
+    max_move_repeats: int = 8          # polish: repeat an accepted block move in the same direction up to this often
     confirm_seed_factor: float = 2.0   # confirmation seeds = factor x search seeds (0 = no confirmation)
-    restructure_shares: tuple = (0.5, 1.0)  # restructure: RM support as share of the extra lot need (() = off)
-    restructure_tolerance: float = 0.05  # restructure: improve a repaired jump if its cost is within this share
+    repair_dz: float = 0.2             # repair: step of a safety factor z (doubled after a step without progress)
+    trial_repair_steps: int = 12       # line search: repair steps for a move that is cheaper but breaks cells
+    trial_repair_saving: float = 0.005  # ... only if it is at least this share cheaper
+    holdout_repair_steps: int = 4      # hold-out check: repair steps per weak cell on the hold-out seeds
+    min_pass_gain: float = 0.0005      # line search: stop when a pass lowers the cost by less than this share
+    polish_first_level: int = 2        # polish: coarsest block level (1 = halves of the horizon, 2 = quarters)
+    polish_move_repeats: int = 2       # polish: repeat an accepted block move up to this often
     n_workers: int = 0                 # parallel worker processes of the search (0 = automatic, 1 = none)
 
 

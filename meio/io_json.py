@@ -239,6 +239,25 @@ def policy_dict(model: ModelInput, schedule) -> dict:
     }
 
 
+PARAMETER_NAMES = {
+    "DC": {"z": "safety_factor_z", "cover": "lot_cover_weeks", "min_lot": "minimum_lot", "cap": "order_cap_weeks",
+           "end": "end_of_horizon_z_shift"},
+    "RM": {"z": "safety_factor_z", "cover": "lot_cover_weeks", "floor": "minimum_stock_weeks",
+           "end": "end_of_horizon_z_shift"},
+}
+
+
+def parameters_dict(model: ModelInput, parameters: dict) -> dict:
+    """The tuned search variables per item (meio/parametric.py): the (s,S) levels of every week
+    follow from these and the forecast; week-specific exceptions are in the levels themselves."""
+    out = {"products": {}, "materials": {}}
+    for (kind, name, param), value in sorted(parameters.items()):
+        group = "products" if kind == "DC" else "materials"
+        out[group].setdefault(name, {})[PARAMETER_NAMES[kind][param]] = round(float(value), 4)
+    out["n_parameters"] = len(parameters)
+    return out
+
+
 def meta_dict(model: ModelInput) -> dict:
     """What the summary covers: items, channels, production sites, independent groups,
     weeks, evaluation window, commit week."""
@@ -265,12 +284,12 @@ def meta_dict(model: ModelInput) -> dict:
 def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, cells: pd.DataFrame,
                   costs: pd.DataFrame, kpis: pd.DataFrame, schedule, weekly_means: pd.DataFrame,
                   weekly_bands: list[dict] | None = None, baseline: dict | None = None,
-                  settings: dict | None = None) -> dict:
+                  settings: dict | None = None, parameters: dict | None = None) -> dict:
     """The run result as plain data: what to do now, how good the plan is, and the policy.
     All keys are snake_case so that an app or API can use them directly.
 
-    Version 2 adds (only when given): meta, weekly_bands, service.cells, baseline, settings.
-    The keys of version 1 are unchanged."""
+    Version 2 adds (only when given): meta, weekly_bands, service.cells, baseline, settings,
+    policy.parameters. The keys of version 1 are unchanged."""
     failed = cells[~cells["test_pass"]][["product", "channel", "week", "target_F", "target_share",
                                          "test_futures_meeting_F", "test_seeds_with_demand", "test_share_met",
                                          "test_mean_fill", "test_se"]]
@@ -295,6 +314,8 @@ def build_summary(model: ModelInput, run_info: dict, decisions: pd.DataFrame, ce
             "test_futures_meeting_F": "futures_meeting_target", "test_seeds_with_demand": "seeds_with_demand",
             "test_share_met": "share_of_futures_meeting_target",
             "test_mean_fill": "mean_fill", "test_se": "se", "test_pass": "pass"}))
+    if parameters:
+        summary["policy"]["parameters"] = parameters_dict(model, parameters)
     if baseline is not None:
         summary["baseline"] = baseline
     if settings is not None:

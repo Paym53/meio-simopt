@@ -126,6 +126,7 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
         "mean cost over horizon (test seeds)": round(test_result.mean_total_cost()),
         "test cells passing": f"{int(cells['test_pass'].sum())} / {len(cells)}",
         "independent groups": " | ".join(", ".join(g) for g in groups),
+        "search variables (parameters)": len(outcome.parameters),
     }
     for name, cap in outcome.schedule.dc_cap.items():
         run_info[f"DC order cap {name}"] = cap
@@ -155,7 +156,8 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
         ("10_Committed_Week1", "Decisions to execute now (identical in all seeds, because the current state is known)",
          decisions),
         ("11_Service_Cells", "Fill-rate cells: search rule, hold-out mean, final test verdict", cells),
-        ("12_Holdout_Margins", "Weak cells per round (hold-out mean fill < F) and the margins applied", holdout),
+        ("12_Holdout_Margins", "Weak cells per round (hold-out share of futures meeting F < alpha) and the margins applied",
+         holdout),
         ("13_Costs", f"Cost per component over {test_seeds.n_seeds} test seeds", costs),
         ("14_KPIs", "Key performance indicators on the test seeds", kpis),
         ("15_Weekly_Means", "Mean over all test seeds per week", weekly),
@@ -174,6 +176,8 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
         ("23_Checks", "Unit balances over all test seeds", checks),
         ("24_Search_Log", "Accepted search steps", pd.DataFrame(outcome.search_log)),
         ("25_Lookahead", "Week-1 lookahead: every candidate quantity, evaluated on the search seeds", lookahead_log),
+        ("26_Search_Parameters", "The tuned search variables: the (s,S) levels follow from these and the forecast",
+         tables.parameters_table(outcome.parameters)),
     ]
     write_workbook(excel_path, sheets)
 
@@ -185,7 +189,8 @@ def run(model: ModelInput, settings: SearchSettings, run_dir: str, preset_name: 
           f"  |  optimised: {run_info['mean cost over horizon (test seeds)']:,.0f}, {run_info['test cells passing']}")
 
     summary = build_summary(model, run_info, decisions, cells, costs, kpis, outcome.schedule, weekly,
-                            weekly_bands=bands, baseline=baseline, settings=asdict(settings))
+                            weekly_bands=bands, baseline=baseline, settings=asdict(settings),
+                            parameters=outcome.parameters)
     save_json(summary, os.path.join(run_dir, "summary.json"))
     print(f"Also written: {os.path.join(run_dir, 'summary.json')} and input.json")
     print(f"Total runtime: {time.time() - started:.1f} s")

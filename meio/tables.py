@@ -34,12 +34,13 @@ def settings_table(model: ModelInput, settings: SearchSettings, extra: dict) -> 
         ("Search seeds", settings.n_search_seeds, "used to accept or reject moves"),
         ("Hold-out seeds", settings.n_holdout_seeds, "used to find weak cells"),
         ("Test seeds", settings.n_test_seeds, "untouched, used once for the final verdict"),
-        ("Z (safety multiplier)", settings.z, "search rule: mean - Z*SE - margin >= F"),
-        ("Minimum margin bump", settings.min_margin_bump, "weak cell: margin += max(bump, F - hold-out mean)"),
-        ("Max outer rounds", settings.max_outer_rounds, "repair -> improve -> hold-out check"),
-        ("Max improve passes", settings.max_improve_passes, ""),
+        ("Z (safety multiplier)", settings.z, "search rule: share - Z*SE - margin >= alpha"),
+        ("Minimum margin bump", settings.min_margin_bump, "weak cell: margin += max(bump, alpha - hold-out share)"),
+        ("Max outer rounds", settings.max_outer_rounds, "search -> hold-out check rounds"),
+        ("Line-search passes", settings.max_improve_passes, "the parameter grid halves every pass"),
         ("Step fraction (start / min)", f"{settings.step_fraction} / {settings.min_step_fraction}",
-         "move size as fraction of the level, at least one batch"),
+         "local repair and polish: move size as fraction of the level, at least one batch"),
+        ("Repair step of z", settings.repair_dz, "doubled after a step without progress"),
         ("Cut-share threshold", settings.cut_share_threshold,
          "share of seeds with RM-limited releases that makes the repair raise RMW levels"),
         ("Initial quantile q0", settings.initial_quantile or "max target F of the item", "start schedule"),
@@ -49,6 +50,24 @@ def settings_table(model: ModelInput, settings: SearchSettings, extra: dict) -> 
     ]
     rows += [(k, v, "") for k, v in extra.items()]
     return pd.DataFrame(rows, columns=["Setting", "Value", "Explanation"])
+
+
+PARAMETER_MEANING = {
+    "z": "safety factor: s = Phi(z)-quantile of the demand over the protection interval (lead time + review)",
+    "cover": "lot: S - s = mean forecast of this many weeks after the protection interval",
+    "min_lot": "smallest lot (0 or a price-break quantity)",
+    "cap": "order cap in weeks of mean demand (never below the largest lot)",
+    "floor": "minimum physical RMW stock in weeks of mean use",
+    "end": "end of horizon: S at most the Phi(z + shift)-quantile of the demand left until week H",
+}
+
+
+def parameters_table(parameters: dict) -> pd.DataFrame:
+    """The tuned search variables, one row per item and parameter."""
+    rows = [{"location": "DC" if kind == "DC" else "RMW", "item": name, "parameter": param,
+             "value": round(float(value), 4), "meaning": PARAMETER_MEANING[param]}
+            for (kind, name, param), value in sorted(parameters.items())]
+    return pd.DataFrame(rows, columns=["location", "item", "parameter", "value", "meaning"])
 
 
 def products_table(model: ModelInput) -> tuple[pd.DataFrame, pd.DataFrame]:

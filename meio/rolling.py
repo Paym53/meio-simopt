@@ -2,7 +2,7 @@
 Rolling re-optimisation (spec v5, Section 13).
 
 At every review week:
-    1. optimise the (s,S) schedule from the current state (warm start = last schedule, shifted)
+    1. optimise the (s,S) schedule from the current state (warm start = last review's parameters)
     2. commit the week-1 decisions
     3. one real week happens (here: simulated with an independent "reality" seed)
     4. read the new state (stock by age, open orders) and shift the calendar by one week
@@ -15,8 +15,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from .config import DemandForecast, InitialState, ModelInput, SearchSettings
-from .policy import PolicySchedule, dc_order_weeks, initial_schedule, rm_order_weeks
+from .config import DemandForecast, InitialState, ModelInput
 
 
 def state_after_week_one(model: ModelInput, reality) -> InitialState:
@@ -67,27 +66,3 @@ def shift_model_one_week(model: ModelInput, new_state: InitialState) -> ModelInp
     return replace(model, products=products, materials=materials,
                    demand=DemandForecast(mean=mean, sd=sd), initial_state=new_state,
                    capacity_overrides=overrides, sites=sites)
-
-
-def shift_schedule(old: PolicySchedule, old_model: ModelInput, new_model: ModelInput,
-                   settings: SearchSettings) -> PolicySchedule:
-    """Warm start for the next review: week t of the new schedule = week t+1 of the old
-    one. Weeks that were not orderable before get the quantile-based start value."""
-    fresh = initial_schedule(new_model, settings)
-    new = fresh.copy()
-    new.dc_cap = dict(old.dc_cap)                      # horizon-wide parameters carry over
-    new.rm_floor = dict(old.rm_floor)
-    for p in new_model.products:
-        old_product = next(x for x in old_model.products if x.name == p.name)
-        old_active = set(dc_order_weeks(old_model, old_product))
-        for t in dc_order_weeks(new_model, p):
-            if t + 1 in old_active:
-                new.dc_s[p.name][t] = old.dc_s[p.name][t + 1]
-                new.dc_S[p.name][t] = old.dc_S[p.name][t + 1]
-    for m in new_model.materials:
-        old_active = set(rm_order_weeks(old_model, old_model.material(m.name)))
-        for t in rm_order_weeks(new_model, m):
-            if t + 1 in old_active:
-                new.rm_s[m.name][t] = old.rm_s[m.name][t + 1]
-                new.rm_S[m.name][t] = old.rm_S[m.name][t + 1]
-    return new

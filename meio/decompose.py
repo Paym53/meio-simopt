@@ -97,7 +97,8 @@ def merge_outcomes(groups: list[list[str]], outcomes: list[OptimisationOutcome])
         search_log=log, holdout_rounds=holdout, last_search_eval=last,
         last_holdout_cells=pd.concat(hold_cells, ignore_index=True) if hold_cells else None,
         n_evaluations=sum(o.n_evaluations for o in outcomes),
-        chosen_start="; ".join(f"{', '.join(g)}: {o.chosen_start}" for g, o in zip(groups, outcomes)))
+        chosen_start="; ".join(f"{', '.join(g)}: {o.chosen_start}" for g, o in zip(groups, outcomes)),
+        parameters={k: v for o in outcomes for k, v in o.parameters.items()})
 
 
 def optimise(model: ModelInput, settings: SearchSettings, search_seeds: ScenarioSet,

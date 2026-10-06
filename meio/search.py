@@ -1,36 +1,38 @@
 """
-Simulation-optimisation of the (s, S) schedule (spec v5, Section 12.3).
+Simulation-optimisation of the (s, S) schedule: a search over a few forecast-scaled
+parameters per item, then week-specific exceptions (docs/search_algorithm.md).
 
-    MULTI-START: build several start schedules (policy.start_schedules): the classic
-                 quantile start, an economic-lot start (EOQ cover per item, bounded by
-                 shelf life) and price-break starts (lots at the all-units discount
-                 breaks). Repair each and continue from the cheapest feasible one.
-    repeat (outer round):
-        A. REPAIR  : while a cell fails the search rule, raise the levels that feed
-                     the earliest failing week (DC levels, or RMW levels if the
-                     releases in those weeks were cut by missing raw material)
-        B. IMPROVE : coarse-to-fine pattern search. Moves act on BLOCKS of order weeks:
-                     first the whole horizon of an item (its safety level and lot size
-                     as a whole), then halves, quarters ... down to single weeks. Move
-                     types: lower s and S (less safety stock), lower / raise S (smaller /
-                     larger lots), and a coordinated echelon move that changes the DC
-                     lot together with the RMW levels that feed those releases. A move
-                     is kept only if the mean cost falls, the schedule stays feasible on
-                     the search seeds and - on an independent set of confirmation seeds -
-                     no cell becomes weak (share of futures meeting F < alpha) that was not weak before (guards against the
-                     optimizer's curse: among many candidates, some look feasible on the
-                     search seeds by chance). An accepted move is repeated in the same
-                     direction while it keeps paying off.
-        B2. RESTRUCTURE (first round): large-neighbourhood moves to the price-break lots
-                     with RM support, repaired and improved, kept only if cheaper and
-                     confirmed (local steps cannot cross the dearer band in between)
-        C. HOLD-OUT: simulate the hold-out seeds, raise the margin of weak cells
-    until the hold-out check finds no weak cell (or max rounds)
+The levels follow the forecast (meio/parametric.py): per finished good a safety factor z
+(s = the Phi(z)-quantile of the demand over the protection interval), a lot cover m (weeks
+of forecast), a minimum lot (a price break), an order cap and an end-of-horizon quantile;
+per raw material z, m, a minimum physical stock and an end quantile. About 4-5 numbers per
+item instead of an s and an S per item and week.
 
-All candidates are compared on the same search seeds (common random numbers).
-Moving whole blocks keeps the levels following the forecast (no erratic week-to-week
-jumps that would make orders nervous), and searches the few directions that matter
-economically first; single-week moves then fine-tune.
+    MULTI-START : classic (z at the fill-rate target, one week of cover), economic-lot
+                  (EOQ cover) and price-break starts (minimum lot = a discount break); each
+                  gets a global repair and one line-search pass; the best one continues
+    PHASE A     : parameters only
+        repair      greedy marginal analysis: for the earliest failing cell simulate every
+                    parameter that can feed it (z, end quantile, cap of the product or of a
+                    raw material that cut its releases) and raise the one with the largest
+                    service gain per unit of extra cost; cells no parameter can fix are
+                    deferred to phase B (and may not get worse meanwhile)
+        line search per parameter a grid of values around the current one, all simulated
+                    at once; the cheapest feasible one that the confirmation seeds accept is
+                    kept; the grid halves every pass. A move that is much cheaper but breaks
+                    a few cells (a price-break lot, one supplier order less) gets a short
+                    repair first (large-neighbourhood move).
+    PHASE B     : week-specific exceptions on top of the levels (sparse offsets)
+        local repair  the same marginal analysis on the weeks that feed the deferred cells
+                      (pre-building before closed weeks, the first weeks after the review)
+        polish        one coarse-to-fine pass of single-item block moves (halves ... weeks)
+    HOLD-OUT    : weak cells get a margin and are repaired on the hold-out futures themselves
+                  (a risk too rare for the search seeds), then a local repair and a finer
+                  line-search pass; up to max_outer_rounds rounds
+
+All candidates are compared on the same search seeds (common random numbers); candidates of
+one step are simulated in parallel worker processes with the same result as one after the
+other.
 """
 from __future__ import annotations
 
@@ -47,8 +49,8 @@ import pandas as pd
 
 from . import service
 from .config import ModelInput, SearchSettings
-from .policy import (PolicySchedule, dc_order_weeks, feeding_release_weeks, price_break_lots, rm_order_weeks,
-                     start_schedules)
+from .parametric import Key, LevelBuilder, Z_MAX, Z_MIN, add_offsets, difference, zero_offsets
+from .policy import PolicySchedule, dc_order_weeks, feeding_release_weeks, initial_schedule, rm_order_weeks
 from .scenarios import ScenarioSet, build_scenarios
 from .simulation import SimResult, simulate
 
@@ -65,10 +67,24 @@ def _init_worker(model: ModelInput, seeds: ScenarioSet) -> None:
 
 
 def _simulate_cells(schedule: PolicySchedule, z: float, margins: dict):
-    """Worker task: mean cost and cell table (search rule applied) of one schedule."""
+    """Worker task: mean cost, cell table (search rule applied) and cut shares of one schedule."""
     model = _WORKER["model"]
     result = simulate(model, schedule, _WORKER["seeds"], report_details=False)
-    return result.mean_total_cost(), service.apply_search_rule(service.cell_table(model, result), z, margins)
+    return (result.mean_total_cost(), service.apply_search_rule(service.cell_table(model, result), z, margins),
+            cut_shares(model, result))
+
+
+def cut_shares(model: ModelInput, result: SimResult) -> dict:
+    """What cut the releases, per week: the share of futures in which the order cap, the
+    production capacity or a raw material was the binding limit. All the repair diagnosis
+    needs from a simulation (small enough to come back from a worker process)."""
+    out = {}
+    for p in model.products:
+        out[("cap", p.name)] = result.dc[p.name]["cut_by_policy_cap"].mean(axis=0)
+        out[("capacity", p.name)] = result.dc[p.name]["cut_by_capacity"].mean(axis=0)
+    for m in model.materials:
+        out[("rm", m.name)] = result.rm[m.name]["limited_release"].mean(axis=0)
+    return out
 
 
 def default_workers() -> int:
@@ -85,6 +101,7 @@ class Evaluation:
     cost: float
     feasible: bool
     n_failing: int
+    cuts: dict | None = None          # cut_shares: what limited the releases, per week
 
 
 @dataclass
@@ -99,12 +116,13 @@ class OptimisationOutcome:
     last_holdout_cells: pd.DataFrame | None = None
     n_evaluations: int = 0
     chosen_start: str = ""
+    parameters: dict = field(default_factory=dict)    # the tuned parameters {(kind, item, name): value}
 
 
 class Searcher:
     def __init__(self, model: ModelInput, settings: SearchSettings,
                  search_seeds: ScenarioSet, holdout_seeds: ScenarioSet, verbose: bool = True,
-                 start_schedule: PolicySchedule | None = None):
+                 start_values: dict | None = None):
         self.model = model
         self.settings = settings
         self.search_seeds = search_seeds
@@ -116,7 +134,7 @@ class Searcher:
         self.log: list[dict] = []
         self.n_evaluations = 0
         self.rng = np.random.default_rng(settings.base_seed + 7)
-        self.start_schedule = start_schedule      # warm start (e.g. last week's result), else quantile start
+        self.start_values = start_values          # warm start: last review's parameters (horizon-free)
         self.pool = None                          # worker processes while run() is active
         # confirmation seeds: an independent set that only accepted moves are simulated on
         n_confirm = int(round(settings.confirm_seed_factor * settings.n_search_seeds))
@@ -124,6 +142,9 @@ class Searcher:
                               if n_confirm > 0 else None)
         self.confirm_failing: set = set()    # cells failing on the confirmation seeds (current schedule)
         self.confirm_floor: dict = {}        # unfixable cell -> mean fill on the confirmation seeds
+        self.builder = LevelBuilder(model, settings)  # levels from parameters
+        self.offsets = zero_offsets(model)            # week-specific exceptions on top of the levels
+        self.deferred: set = set()                    # cells no parameter can fix: left to the local repair
 
     # ------------------------------------------------------------------
     def say(self, text: str) -> None:
@@ -144,7 +165,7 @@ class Searcher:
         result = simulate(self.model, schedule, self.search_seeds, report_details=False)
         cells = service.apply_search_rule(service.cell_table(self.model, result),
                                           self.settings.z, self.margins)
-        return self.judge(schedule, result.mean_total_cost(), cells, result)
+        return self.judge(schedule, result.mean_total_cost(), cells, result, cut_shares(self.model, result))
 
     def evaluate_many(self, schedules: list[PolicySchedule]) -> list[Evaluation]:
         """Evaluate several candidates, in parallel worker processes if there are any.
@@ -162,7 +183,8 @@ class Searcher:
             self.pool = None
             return [self.evaluate(schedule) for schedule in schedules]
         self.n_evaluations += len(schedules)
-        return [self.judge(schedule, cost, cells) for schedule, (cost, cells) in zip(schedules, outcomes)]
+        return [self.judge(schedule, cost, cells, None, cuts)
+                for schedule, (cost, cells, cuts) in zip(schedules, outcomes)]
 
     @contextmanager
     def workers(self):
@@ -182,7 +204,8 @@ class Searcher:
             self.pool = None
             pool.shutdown(wait=True, cancel_futures=True)
 
-    def judge(self, schedule: PolicySchedule, cost: float, cells: pd.DataFrame, result=None) -> Evaluation:
+    def judge(self, schedule: PolicySchedule, cost: float, cells: pd.DataFrame, result=None,
+              cuts: dict | None = None) -> Evaluation:
         """Feasibility of an evaluated schedule (see evaluate)."""
         keys = list(zip(cells["product"], cells["channel"], cells["week"]))
         bound = cells["search_lower_bound"].to_numpy()
@@ -190,7 +213,7 @@ class Searcher:
         kept = np.array([np.isnan(b) or b >= self.unfixable_floor.get(k, -np.inf) - 1e-9
                          for k, b in zip(keys, bound)])
         failing = int((~cells["search_feasible"].to_numpy() & ~unfixable).sum() + (unfixable & ~kept).sum())
-        return Evaluation(schedule, result, cells, cost, failing == 0, failing)
+        return Evaluation(schedule, result, cells, cost, failing == 0, failing, cuts)
 
     def confirmation(self, schedule: PolicySchedule, with_cost: bool = False):
         """Cells that are weak on the confirmation seeds - share of futures meeting F below alpha,
@@ -369,145 +392,14 @@ class Searcher:
         return sizes + [1] if n_weeks >= 1 else []
 
     # ------------------------------------------------------------------
-    # A. Repair
-    # ------------------------------------------------------------------
-    def raise_levels_for_cell(self, schedule: PolicySchedule, result: SimResult,
-                              product_name: str, week: int, fraction: float | None = None) -> tuple[bool, str]:
-        """Raise the levels that feed `week`. Changes schedule in place.
-        Returns (changed, description).
-
-        Diagnosis on the releases that can arrive in `week` (release weeks
-        week - L_max ... week - L_min):
-          1. releases cut because a raw material was the binding limit
-             -> raise the RMW levels of that material in the weeks whose orders
-                can arrive before those releases
-          2. releases cut because production capacity was the binding limit
-             -> pre-build: raise the DC levels in the weeks just before
-          3. otherwise -> raise the DC levels in the feeding release weeks
-        """
-        model, st = self.model, self.settings
-        frac = fraction or st.step_fraction
-        p = next(x for x in model.products if x.name == product_name)
-        allowed_dc = set(dc_order_weeks(model, p))
-        release_weeks = feeding_release_weeks(model, p, week)
-        pre_build = ""
-        if not release_weeks:
-            # every release week that could reach `week` is closed: pre-build in the
-            # latest open order week before them (its stock must cover this week too)
-            first = week - model.release_to_dc_max(p)
-            earlier = [r for r in allowed_dc if r < first]
-            if first < 1 or not earlier:
-                return False, "no release week can still reach this week"
-            release_weeks, pre_build = [max(earlier)], " (pre-build before closed production weeks)"
-
-        # 1. raw material binding?
-        short_materials = [mat for mat in p.bom
-                           if result.rm[mat]["limited_release"][:, release_weeks].mean(axis=0).max()
-                           > st.cut_share_threshold]
-        if short_materials:
-            changed_weeks = {}
-            for mat_name in short_materials:
-                m = model.material(mat_name)
-                allowed = set(rm_order_weeks(model, m))
-                weeks = sorted({o for r in release_weeks
-                                for o in range(r - m.lead_time_max, r - m.lead_time_min + 1) if o in allowed})
-                s, S, batch = self.levels(schedule, "RM", mat_name)
-                for o in weeks:
-                    step = self.step_size(S[o], batch, frac)
-                    s[o] += step
-                    S[o] += step
-                if weeks:
-                    changed_weeks[mat_name] = weeks
-            if changed_weeks:
-                for mat_name in changed_weeks:           # also raise the physical minimum
-                    m = model.material(mat_name)
-                    schedule.rm_floor[mat_name] += self.step_size(max(schedule.rm_floor[mat_name], m.batch_size),
-                                                                  m.batch_size, frac)
-                text = "; ".join(f"{k} weeks {v[0]}-{v[-1]}" for k, v in changed_weeks.items())
-                return True, f"RM was binding -> raised RMW (s,S) and minimum: {text}{pre_build}"
-            return False, f"releases cut by {short_materials}, but no RM order can arrive in time"
-
-        # 1b. orders limited by the policy's own cap? -> raise the cap
-        cap_share = result.dc[p.name]["cut_by_policy_cap"][:, release_weeks].mean(axis=0).max()
-        if cap_share > st.cut_share_threshold:
-            schedule.dc_cap[p.name] += self.step_size(schedule.dc_cap[p.name], p.batch_size, frac)
-            return True, f"order cap was binding -> raised DC cap of {p.name} to {schedule.dc_cap[p.name]}{pre_build}"
-
-        # 2. capacity binding? -> produce earlier
-        capacity_share = result.dc[p.name]["cut_by_capacity"][:, release_weeks].mean(axis=0).max()
-        if capacity_share > st.cut_share_threshold:
-            first = release_weeks[0]
-            span = p.lead_time_max - p.lead_time_min + 1
-            weeks = [r for r in range(first - span, first) if r in allowed_dc]
-            if not weeks:
-                return False, "capacity binding and no earlier week left for pre-building"
-            target_weeks, text = weeks, "capacity was binding -> pre-build: raised DC (s,S)"
-        else:
-            # 3. plain shortage of FG ordering
-            target_weeks, text = release_weeks, "raised DC (s,S)"
-
-        s, S, batch = self.levels(schedule, "DC", p.name)
-        for r in target_weeks:
-            step = self.step_size(S[r], batch, frac)
-            s[r] += step
-            S[r] += step
-        return True, f"{text} of {p.name}: weeks {target_weeks[0]}-{target_weeks[-1]}{pre_build}"
-
-    def repair(self, schedule: PolicySchedule, round_no: int, give_up_above: float = np.inf,
-               fraction: float | None = None) -> Evaluation:
-        """Raise levels until every cell passes the search rule. A cell that shows no
-        progress for `repair_patience` steps is declared unfixable; the level increases
-        made for it since its last progress are undone, so they do not inflate the schedule.
-        give_up_above: stop as soon as more cells than this are unfixable (multi-start: such
-        a start can no longer beat the best one)."""
-        st = self.settings
-        ev = self.evaluate(schedule)
-        progress: dict = {}             # cell -> (best lower bound, steps without progress)
-        checkpoint: dict = {}           # cell -> schedule at its last progress
-        for _ in range(st.max_repair_steps):
-            if len(self.unfixable) > give_up_above:
-                break
-            cells = ev.cells
-            keys = list(zip(cells["product"], cells["channel"], cells["week"]))
-            open_mask = ~cells["search_feasible"].to_numpy() & np.array([k not in self.unfixable for k in keys])
-            if not open_mask.any():
-                break
-            failing = cells[open_mask].sort_values(["week", "search_lower_bound"])
-            cell = failing.iloc[0]
-            key = (cell["product"], cell["channel"], int(cell["week"]))
-
-            best, stuck = progress.get(key, (-np.inf, 0))
-            if cell["search_lower_bound"] > best + st.repair_min_progress:
-                progress[key] = (cell["search_lower_bound"], 0)
-                checkpoint[key] = schedule.copy()
-            else:
-                progress[key] = (best, stuck + 1)
-            if progress[key][1] >= st.repair_patience:
-                self.unfixable.add(key)
-                schedule = checkpoint[key].copy()          # undo the raises that did not help
-                ev = self.evaluate(schedule)
-                self.record(round_no, "repair", "cell declared unfixable",
-                            f"{key}: no progress in {st.repair_patience} steps, raises undone", ev)
-                continue
-
-            changed, text = self.raise_levels_for_cell(schedule, ev.result, key[0], key[2], fraction)
-            if not changed:
-                self.unfixable.add(key)
-                ev = self.evaluate(schedule)
-                self.record(round_no, "repair", "cell declared unfixable", f"{key}: {text}", ev)
-                continue
-            ev = self.evaluate(schedule)
-            self.record(round_no, "repair", f"fix {key[1]} week {key[2]}", text, ev)
-        return ev
-
-    # ------------------------------------------------------------------
-    # B. Improve
+    # Polish: coarse-to-fine block moves on the full schedule (phase B)
     # ------------------------------------------------------------------
     def improve(self, current: Evaluation, round_no: int, n_levels: int | None = None,
                 n_passes: int | None = None, fraction: float | None = None,
-                phase: str = "improve") -> Evaluation:
-        """Coarse-to-fine pattern search (see the module docstring). One pass goes through
-        all block levels, from whole-horizon blocks down to single weeks; at every block
+                phase: str = "improve", first_level: int = 0) -> Evaluation:
+        """Coarse-to-fine pattern search on the full schedule (the polish of phase B). One pass
+        goes through the block levels from first_level on (0 = whole horizon, 1 = halves, ...)
+        down to single weeks; at every block
         the first move that lowers the cost (and stays feasible) is accepted and repeated
         while it keeps paying off. The step fraction is halved after every pass.
 
@@ -540,7 +432,7 @@ class Searcher:
             accepted = 0
             cost_before = current.cost
             hits: set = set()
-            for level in range(n_levels):
+            for level in range(first_level, n_levels):
                 blocks = []
                 for kind, name, weeks in items:
                     sizes = self.block_sizes(len(weeks))
@@ -574,7 +466,7 @@ class Searcher:
                             self.record(round_no, phase, f"{move}: {kind} {name} {where}",
                                         f"pass {pass_no}, step fraction {fraction:.3f}", ev)
                             repeats += 1
-                            if repeats > st.max_move_repeats:
+                            if repeats > (st.polish_move_repeats if phase == "polish" else st.max_move_repeats):
                                 break
                             candidate = self.moved_block(current.schedule, kind, name, block, move, fraction)
                             if candidate is None:
@@ -594,57 +486,6 @@ class Searcher:
 
     # ------------------------------------------------------------------
     # B2. Restructure: large-neighbourhood moves to the price-break lots
-    # ------------------------------------------------------------------
-    def restructure(self, current: Evaluation, round_no: int) -> Evaluation:
-        """Large-neighbourhood moves that small steps cannot make (iterated local search).
-
-        With all-units discounts the cost landscape has separate valleys: a larger lot is
-        cheaper per unit, but only once the lot reaches the next price break AND the RMW
-        holds enough raw material for it; every small step on the way is dearer or cuts
-        releases. So, per product and price break above its current typical lot: set every
-        DC lot to the break (cap included), raise the RMW levels that feed the releases by
-        a share of the extra need and repair. A jump whose repaired cost is within
-        restructure_tolerance of the current cost gets one finer improve pass; it is kept only
-        if it is then feasible, cheaper and confirmed. Without price breaks: no change."""
-        st, model = self.settings, self.model
-        if not current.feasible or st.restructure_shares == ():
-            return current
-        best = current
-        for p in model.products:
-            weeks = dc_order_weeks(model, p)
-            if not weeks:
-                continue
-            w = np.asarray(weeks)
-            typical_lot = int(np.median((best.schedule.dc_S[p.name] - best.schedule.dc_s[p.name])[w]))
-            breaks = [b for b in price_break_lots(model, p) if b > typical_lot][:2]
-            for lot in breaks:
-                for share in st.restructure_shares:
-                    candidate = best.schedule.copy()
-                    s_, S_ = candidate.dc_s[p.name], candidate.dc_S[p.name]
-                    S_[w] += np.maximum(0, lot - (S_ - s_)[w])
-                    candidate.dc_cap[p.name] = max(candidate.dc_cap[p.name], lot)
-                    extra = share * max(0, lot - typical_lot)
-                    for mat_name, rm_weeks in self.rm_weeks_feeding(p.name, weeks).items():
-                        add = int(np.ceil(p.bom[mat_name] * extra))
-                        candidate.rm_s[mat_name][rm_weeks] += add
-                        candidate.rm_S[mat_name][rm_weeks] += add
-                    unfixable_before = set(self.unfixable)
-                    ev = self.repair(candidate, round_no, give_up_above=len(unfixable_before))
-                    label = f"lot {lot} for {p.name} with {share:.0%} RM support"
-                    promising = ev.cost < best.cost * (1 + st.restructure_tolerance)
-                    if ev.feasible and len(self.unfixable) == len(unfixable_before) and promising:
-                        ev = self.improve(ev, round_no, n_passes=1, fraction=st.step_fraction / 2,
-                                          phase="restructure trial")
-                    if (ev.feasible and len(self.unfixable) == len(unfixable_before)
-                            and ev.cost < best.cost - 1e-6 and self.no_new_weak_cells(best, ev)):
-                        self.say(f"    restructure: {label}: mean cost {best.cost:,.0f} -> {ev.cost:,.0f}")
-                        self.record(round_no, "restructure", label, "accepted", ev)
-                        best = ev
-                    else:
-                        self.unfixable = unfixable_before
-                        self.record(round_no, "restructure", label, "rejected", ev)
-        return best
-
     def no_new_weak_cells(self, before: Evaluation, after: Evaluation) -> bool:
         """Confirmation for a large move: on the confirmation seeds it is cheaper as well and no
         cell is weak after it that was not weak before (True without confirmation seeds).
@@ -659,43 +500,405 @@ class Searcher:
 
     # ------------------------------------------------------------------
     # Main loop
+
     # ------------------------------------------------------------------
-    def choose_start(self) -> tuple[PolicySchedule, Evaluation, str]:
-        """Multi-start: repair every start schedule, give each feasible one a coarse racing
-        pass (whole-horizon and half-horizon blocks) and keep the best one: the smallest total
-        service gap over all cells (sum of F - lower bound where below target; differences
-        under 0.01 count as equal), then the lowest mean cost.
-        The classic start is repaired first; the cells it cannot fix (structural: freshness
-        or lead times) are known to the later starts, which therefore do not spend repair
-        steps on them again."""
+    # Parameters -> schedule
+    # ------------------------------------------------------------------
+    def schedule_of(self, values: dict[Key, float], offsets: PolicySchedule | None = None) -> PolicySchedule:
+        """The full (s, S) schedule: forecast-scaled levels plus the week-specific offsets."""
+        return add_offsets(self.builder.build(values), self.offsets if offsets is None else offsets)
+
+    def coordinates(self) -> list[Key]:
+        """The search variables, in a fixed order: 5 per finished good, 4 per raw material."""
+        keys = []
+        for p in self.model.products:
+            keys += [("DC", p.name, "z"), ("DC", p.name, "cover"), ("DC", p.name, "min_lot"), ("DC", p.name, "cap"),
+                     ("DC", p.name, "end")]
+        for m in self.model.materials:
+            keys += [("RM", m.name, "z"), ("RM", m.name, "cover"), ("RM", m.name, "floor"), ("RM", m.name, "end")]
+        return keys
+
+    # ------------------------------------------------------------------
+    # Repair: greedy marginal analysis
+    # ------------------------------------------------------------------
+    def feeding_weeks(self, product, week: int) -> list[int]:
+        """Release weeks whose FG can arrive in `week`; if all of them are closed, the latest
+        open order week before them (pre-build)."""
+        release_weeks = feeding_release_weeks(self.model, product, week)
+        if release_weeks:
+            return release_weeks
+        first = week - self.model.release_to_dc_max(product)
+        earlier = [r for r in dc_order_weeks(self.model, product) if r < first]
+        return [max(earlier)] if first >= 1 and earlier else []
+
+    def repair_candidates(self, values, ev: Evaluation, product_name: str, week: int,
+                          dz: float, fraction: float | None, mode: str) -> list[tuple[str, dict, object]]:
+        """Possible fixes for one failing cell, as (label, values, offsets):
+          local  : raise the DC levels of the release weeks that feed the week, or the RMW
+                   levels (and minimum) of a raw material that cut those releases
+          global : raise the safety factor or the end quantile of the product or of a
+                   binding material, or the order cap if it cut the orders"""
+        model, st = self.model, self.settings
+        frac = fraction or st.step_fraction
+        p = next(x for x in model.products if x.name == product_name)
+        weeks = self.feeding_weeks(p, week)
+        if not weeks:
+            return []
+        cut = lambda kind, name: ev.cuts[(kind, name)][weeks].max() > st.cut_share_threshold  # noqa: E731
+        # local fixes: a material that cut the releases in any future is a candidate (with a chance
+        # constraint the failing futures are the rare ones; the marginal analysis decides if it pays);
+        # parameters act on the whole horizon: only materials that cut often
+        short = [mat for mat in p.bom
+                 if (ev.cuts[("rm", mat)][weeks].max() > 0 if mode == "local" else cut("rm", mat))]
+        out = []
+        if mode == "global":                            # parameters only: z, end quantile, cap
+            if cut("cap", p.name):
+                new = dict(values)
+                new[("DC", p.name, "cap")] += 0.5
+                out.append((f"cap {p.name} +0.5", new, self.offsets))
+            for kind, name in [("DC", p.name)] + [("RM", mat) for mat in short]:
+                if values[(kind, name, "end")] < 0:
+                    new = dict(values)
+                    new[(kind, name, "end")] = min(0.0, values[(kind, name, "end")] + 0.25)
+                    out.append((f"end {kind} {name} +0.25", new, self.offsets))
+                if values[(kind, name, "z")] + dz <= Z_MAX:
+                    new = dict(values)
+                    new[(kind, name, "z")] += dz
+                    out.append((f"z {kind} {name} +{dz:g}", new, self.offsets))
+            return out
+        off = self.offsets.copy()                       # local DC raise (pre-build if capacity binds)
+        dc_weeks = weeks
+        if cut("capacity", p.name):
+            span = p.lead_time_max - p.lead_time_min + 1
+            allowed = set(dc_order_weeks(model, p))
+            dc_weeks = [r for r in range(weeks[0] - span, weeks[0]) if r in allowed] or weeks
+        S = ev.schedule.dc_S[p.name]
+        for r in dc_weeks:
+            step = self.step_size(S[r], p.batch_size, frac)
+            off.dc_s[p.name][r] += step
+            off.dc_S[p.name][r] += step
+        out.append((f"local DC {p.name} weeks {dc_weeks[0]}-{dc_weeks[-1]}", values, off))
+        for mat in short:                               # local RM raise per binding material
+            m = model.material(mat)
+            allowed = set(rm_order_weeks(model, m))
+            rm_weeks = sorted({o for r in weeks for o in range(r - m.lead_time_max, r - m.lead_time_min + 1)
+                               if o in allowed})
+            if not rm_weeks:
+                continue
+            off = self.offsets.copy()
+            S = ev.schedule.rm_S[mat]
+            for o in rm_weeks:
+                step = self.step_size(S[o], m.batch_size, frac)
+                off.rm_s[mat][o] += step
+                off.rm_S[mat][o] += step
+            off.rm_floor[mat] += self.step_size(max(ev.schedule.rm_floor[mat], m.batch_size), m.batch_size, frac)
+            out.append((f"local RM {mat} weeks {rm_weeks[0]}-{rm_weeks[-1]}", values, off))
+        if cut("cap", p.name):
+            new = dict(values)
+            new[("DC", p.name, "cap")] += 0.5
+            out.append((f"cap {p.name} +0.5", new, self.offsets))
+        for kind, name in [("DC", p.name)] + [("RM", mat) for mat in short]:
+            # the end quantile only acts on the last weeks: a local fix as well
+            if values[(kind, name, "end")] < 0:
+                new = dict(values)
+                new[(kind, name, "end")] = min(0.0, values[(kind, name, "end")] + 0.25)
+                out.append((f"end {kind} {name} +0.25", new, self.offsets))
+        return out
+
+    @staticmethod
+    def open_gap(ev: Evaluation, unfixable: set) -> tuple[float, dict]:
+        """Total service gap over the cells that are still to be fixed (sum of alpha - search
+        lower bound where negative), and the lower bound per cell."""
+        cells = ev.cells
+        bounds = {}
+        gap = 0.0
+        for p, c, w, target, bound, ok in zip(cells["product"], cells["channel"], cells["week"], cells["target_share"],
+                                             cells["search_lower_bound"], cells["search_feasible"]):
+            key = (p, c, int(w))
+            b = -1.0 if np.isnan(bound) else float(bound)
+            bounds[key] = b
+            if not ok and key not in unfixable:
+                gap += max(0.0, target - b)
+        return gap, bounds
+
+    def repair(self, values, round_no: int, dz: float | None = None, give_up_above: float = np.inf,
+               mode: str = "local", fraction: float | None = None, max_steps: int | None = None,
+               cost_limit: float = np.inf):
+        """Greedy marginal analysis (cf. Sherbrooke's METRIC): while a cell fails the search
+        rule, take the earliest failing cell, simulate every possible fix for it at once
+        (repair_candidates, in parallel) and keep the one that moves the cell and has the
+        largest reduction of the total service gap per unit of extra cost.
+
+          mode "global": parameters only (phase A); a cell they do not move in 2 steps is
+                         deferred to the local repair and may not get worse meanwhile
+          mode "local" : week-specific raises (phase B, hold-out rounds); a cell no fix moves
+                         for repair_patience steps is declared unfixable
+        A step without progress doubles the next step (at most 2 x step_fraction). The raises
+        made for a cell that is given up are undone. Stops early when more cells than
+        give_up_above are left out or the cost reaches cost_limit (a repair only adds cost).
+        Returns (evaluation, values); the offsets are updated in self.offsets."""
         st = self.settings
-        if self.start_schedule is not None:
-            starts = [("warm start (previous review, shifted)", self.start_schedule.copy())]
-        else:
-            starts = start_schedules(self.model, self.settings)
-        best, known_unfixable = None, set()
-        for label, schedule in starts:
-            self.unfixable = set(known_unfixable)
-            ev = self.evaluate(schedule.copy())
-            self.record(0, "start", label, "", ev)
-            self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
-            if len(starts) > 1:
-                ev = self.repair(ev.schedule, 0, give_up_above=len(best[2]) if best else np.inf)
-                self.say(f"    repaired: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
-                         f"unfixable cells {len(self.unfixable)}")
-                if st.race_levels > 0 and ev.feasible and (best is None or len(self.unfixable) <= len(best[2])):
-                    # racing: one coarse pass (whole horizon and halves) before comparing,
-                    # because the cost right after repair says little about where a start leads
-                    ev = self.improve(ev, 0, n_levels=self.settings.race_levels, n_passes=1,
-                                      phase="race")
-            key = (round(self.service_gap(ev), 2), ev.cost)
-            if best is None or key < best[0]:
-                best = (key, ev, set(self.unfixable), label)
-            known_unfixable |= self.unfixable
-        _, ev, self.unfixable, label = best
-        if len(starts) > 1:
-            self.say(f"  chosen start: {label}")
-        return starts[0][1], ev, label
+        dz = dz or st.repair_dz
+        ev = self.evaluate(self.schedule_of(values))
+        progress, checkpoint = {}, {}
+        for _ in range(max_steps or st.max_repair_steps):
+            if len(self.unfixable) > give_up_above or ev.cost >= cost_limit:
+                break                          # (a repair only adds cost: past the limit it cannot win)
+            cells = ev.cells
+            keys = list(zip(cells["product"], cells["channel"], cells["week"]))
+            open_mask = ~cells["search_feasible"].to_numpy() & np.array([k not in self.unfixable for k in keys])
+            if not open_mask.any():
+                break
+            cell = cells[open_mask].sort_values(["week", "search_lower_bound"]).iloc[0]
+            key = (cell["product"], cell["channel"], int(cell["week"]))
+            best, stuck = progress.get(key, (-np.inf, 0))
+            if cell["search_lower_bound"] > best + st.repair_min_progress:
+                progress[key] = (cell["search_lower_bound"], 0)
+                checkpoint[key] = (dict(values), self.offsets.copy())
+            else:
+                progress[key] = (best, stuck + 1)
+            # a step that brought no progress is doubled next time (small steps may not move a
+            # share measured on a few hundred futures at all)
+            step = min((fraction or st.step_fraction) * 2 ** progress[key][1], 2 * st.step_fraction)
+            candidates = self.repair_candidates(values, ev, key[0], key[2], dz * 2 ** progress[key][1], step, mode)
+            patience = st.repair_patience if mode == "local" else 2
+            if progress[key][1] >= patience or not candidates:
+                self.unfixable.add(key)
+                if mode == "global":                   # left to the local repair (phase B)
+                    self.deferred.add(key)
+                if progress[key][1] >= patience:
+                    values, self.offsets = dict(checkpoint[key][0]), checkpoint[key][1].copy()
+                    ev = self.evaluate(self.schedule_of(values))
+                self.record(round_no, "repair", "cell deferred" if mode == "global" else "cell declared unfixable",
+                            f"{key}", ev)
+                continue
+            gap_before, bounds_before = self.open_gap(ev, self.unfixable)
+            evaluated = self.evaluate_many([self.schedule_of(v, off) for _, v, off in candidates])
+            # rank: fixes that move the cell itself first, then gap reduction per unit of extra cost
+            best_choice, best_score = None, (-1, -np.inf)
+            for (label, v, off), cand in zip(candidates, evaluated):
+                gap_after, bounds_after = self.open_gap(cand, self.unfixable)
+                gain = gap_before - gap_after
+                own = bounds_after[key] - bounds_before[key]
+                if gain <= 1e-9 and own <= st.repair_min_progress:
+                    continue
+                score = (int(own > st.repair_min_progress), max(gain, 0.0) / max(cand.cost - ev.cost, 1.0))
+                if score > best_score:
+                    best_choice, best_score = (label, v, off, cand), score
+            if best_choice is None:                    # nothing helps this step: count as no progress
+                label, v, off, cand = candidates[0][0], candidates[0][1], candidates[0][2], evaluated[0]
+            else:
+                label, v, off, cand = best_choice
+            values, self.offsets = dict(v), off.copy()
+            ev = cand
+            self.record(round_no, "repair", f"fix {key[1]} week {key[2]}", label, ev)
+        return ev, values
+
+    GRID = {"z": (-1.0, -0.6, -0.3, -0.15, 0.15, 0.3), "cover": (-2, -1, -0.5, 0.5, 1, 2),
+            "cap": (-1, -0.5, 0.5, 1), "floor": (-1, -0.5, 0.5, 1), "end": (-1, -0.5, -0.25, 0.25, 0.5)}
+    FLOOR_FACTORS = (0.0, 0.5, 0.75, 1.25)      # the floor also moves multiplicatively (0 = no minimum)
+    COARSE_GRID = {"z": (-0.6, -0.3, 0.3), "cover": (-1, 1), "cap": (-1, 1), "floor": (-1, 1), "end": (-1, -0.5)}
+    COARSE_FLOOR_FACTORS = (0.0, 0.5)            # racing the starts: fewer points per parameter
+
+    def line_candidates(self, values, key: Key, scale: float, coarse: bool = False) -> list[tuple[str, dict]]:
+        """Grid of values for one parameter around its current value (a line search);
+        coarse = the smaller grid used to race the starts."""
+        kind, name, param = key
+        out = []
+        if param == "min_lot":
+            for lot in self.builder.price_breaks(name):
+                if lot != values[key]:
+                    new = dict(values)
+                    new[key] = lot
+                    out.append((f"min lot {name} -> {lot:.0f}", new))
+            return out
+        grid, factors = (self.COARSE_GRID, self.COARSE_FLOOR_FACTORS) if coarse else (self.GRID, self.FLOOR_FACTORS)
+        targets = [(values[key] + delta * scale, f"{delta * scale:+.3g}") for delta in grid[param]]
+        if param == "floor":
+            targets += [(values[key] * f, f"x{f:g}") for f in factors if values[key] * f != values[key]]
+        for target, d in targets:
+            new = dict(values)
+            new[key] = target
+            if param == "z" and not Z_MIN <= new[key] <= Z_MAX:
+                continue
+            if param == "cover" and not 0 <= new[key] <= self.builder.max_cover(kind, name):
+                continue
+            if param in ("cap", "floor") and new[key] < 0:
+                continue
+            if param == "end" and not -3 <= new[key] <= 0:
+                continue
+            out.append((f"{param} {kind} {name} {d}", new))
+            step = target - values[key]
+            if param == "cover" and kind == "DC" and abs(abs(step) - scale) < 1e-9:
+                both = dict(new)          # the RM covers follow the FG lot (echelon coordination)
+                for mat in next(p for p in self.model.products if p.name == name).bom:
+                    rk = ("RM", mat, "cover")
+                    both[rk] = min(max(0.0, values[rk] + step), self.builder.max_cover("RM", mat))
+                out.append((f"cover {kind} {name} {d} with RM", both))
+        return out
+
+    def line_search(self, ev: Evaluation, values, round_no: int, n_passes: int, first_pass: int = 0,
+                    phase: str = "improve"):
+        """Coordinate line search: per parameter a grid of values around the current one,
+        all simulated at once (parallel); the cheapest feasible and confirmed one is kept.
+        The grid shrinks by half every pass."""
+        if not ev.feasible:
+            return ev, values
+        self.unfixable_floor = self.service_floors(ev)
+        if self.confirm_seeds is not None:
+            self.confirm_floor = {}
+            self.confirm_failing, self.confirm_floor = self.confirmation(ev.schedule)
+        for pass_no in range(first_pass, first_pass + n_passes):
+            scale = 1 / 2 ** pass_no
+            accepted, cost_before = 0, ev.cost
+            for key in self.coordinates():
+                moves = self.line_candidates(values, key, scale, coarse=(phase == "race"))
+                if not moves:
+                    continue
+                evaluated = self.evaluate_many([self.schedule_of(v) for _, v in moves])
+                order = sorted((e.cost, j) for j, e in enumerate(evaluated)
+                               if e.feasible and e.cost < ev.cost - 1e-6)
+                found = False
+                for _, j in order[:2]:
+                    if self.confirmed(evaluated[j].schedule):
+                        ev, values = evaluated[j], moves[j][1]
+                        accepted += 1
+                        found = True
+                        self.record(round_no, phase, moves[j][0], f"pass {pass_no}", ev)
+                        break
+                if not found and pass_no <= first_pass + 1:
+                    # a big saving that breaks a few cells (a price-break lot, one supplier order
+                    # less of an expensive material) gets a short repair before it is judged:
+                    # a large-neighbourhood move (cf. the restructure step of the old search)
+                    limit = ev.cost * (1 - self.settings.trial_repair_saving)
+                    promising = sorted((e.cost, j) for j, e in enumerate(evaluated)
+                                       if not e.feasible and e.cost < limit)
+                    for _, j in promising[:1]:
+                        trial = self.trial_with_repair(moves[j][1], ev, round_no)
+                        if trial is not None:
+                            ev, values = trial
+                            accepted += 1
+                            self.record(round_no, phase, moves[j][0] + " (repaired)", f"pass {pass_no}", ev)
+                            break
+            self.say(f"    {phase} pass {pass_no}: {accepted:3d} moves accepted, "
+                     f"mean cost {cost_before:,.0f} -> {ev.cost:,.0f}")
+            if pass_no >= first_pass + 1 and cost_before - ev.cost < self.settings.min_pass_gain * cost_before:
+                break                              # converged: the last pass gained (almost) nothing
+        self.unfixable_floor, self.confirm_floor = {}, {}
+        return ev, values
+
+    def trial_with_repair(self, values, current: Evaluation, round_no: int):
+        """Repair a structural move (few steps, no new unfixable cells) and keep it only if it
+        is then feasible, cheaper and confirmed on the confirmation seeds. Returns
+        (evaluation, values) or None; on None the search state is unchanged."""
+        saved = (set(self.unfixable), self.offsets.copy(), dict(self.unfixable_floor), set(self.deferred))
+        ev, new_values = self.repair(values, round_no, max_steps=self.settings.trial_repair_steps, mode="global",
+                                     give_up_above=len(self.unfixable), cost_limit=current.cost)
+        if (ev.feasible and len(self.unfixable) == len(saved[0]) and ev.cost < current.cost - 1e-6
+                and self.no_new_weak_cells(current, ev)):
+            self.confirm_failing, _ = self.confirmation(ev.schedule)
+            return ev, new_values
+        self.unfixable, self.offsets, self.unfixable_floor, self.deferred = saved
+        return None
+
+    def holdout_repair(self, ev: Evaluation, values, weak: pd.DataFrame, round_no: int):
+        """Cells the hold-out check found weak are repaired on the hold-out futures themselves:
+        a cell can pass every search future and still be weak on the larger hold-out set (its
+        risk is too rare to show in a few hundred futures); then no repair on the search seeds
+        can see progress. Per weak cell (earliest week first) every possible fix is simulated
+        on the hold-out seeds; the one with the largest gain in that cell's share (up to what it
+        still needs) per unit of extra cost is kept, until the share clears alpha by Z standard
+        errors (at most holdout_repair_steps)."""
+        if weak.empty:
+            return ev, values
+        # like the search rule: the share must clear alpha by Z standard errors (n = hold-out seeds)
+        n = self.settings.n_holdout_seeds
+        alpha = self.model.target_share_of_futures
+        p_hat = min(alpha, 1 - 1 / (n + 2))
+        alpha = min(alpha + self.settings.z * np.sqrt(p_hat * (1 - p_hat) / n), 1 - 0.5 / n)
+        n_search = self.settings.n_search_seeds
+        saturated = {(p, c, int(w)): share >= 1 - 1.5 / n_search
+                     for p, c, w, share in zip(ev.cells["product"], ev.cells["channel"], ev.cells["week"],
+                                               ev.cells["share_met"])}
+        for _, row in weak.sort_values("week").iterrows():
+            key = (row["product"], row["channel"], int(row["week"]))
+            if not saturated.get(key, False):
+                continue          # the search seeds see the risk too: the margin and the normal repair do it
+            for step in range(self.settings.holdout_repair_steps):
+                base = simulate(self.model, ev.schedule, self.holdout_seeds, report_details=False)
+                share = self._share(base, key)
+                if share >= alpha:
+                    break
+                frac = min(self.settings.step_fraction * 2 ** step, 2 * self.settings.step_fraction)
+                candidates = (self.repair_candidates(values, ev, key[0], key[2], self.settings.repair_dz, frac, "local")
+                              + self.repair_candidates(values, ev, key[0], key[2], self.settings.repair_dz, frac,
+                                                       "global"))
+                best, best_score = None, -np.inf
+                for label, v, off in candidates:
+                    sched = self.schedule_of(v, off)
+                    trial = simulate(self.model, sched, self.holdout_seeds, report_details=False)
+                    gain = min(self._share(trial, key), alpha) - share        # only what the cell still needs
+                    if gain <= 0:
+                        continue
+                    score = gain / max(trial.mean_total_cost() - base.mean_total_cost(), 1.0)
+                    if score > best_score:
+                        best, best_score = (label, v, off, sched), score
+                if best is None:
+                    break
+                label, v, off, sched = best
+                values, self.offsets = dict(v), off.copy()
+                ev = self.evaluate(sched)
+                self.record(round_no, "hold-out repair", f"fix {key[1]} week {key[2]}", label, ev)
+        return ev, values
+
+    def _share(self, result, key) -> float:
+        cells = service.cell_table(self.model, result)
+        row = cells[(cells["product"] == key[0]) & (cells["channel"] == key[1]) & (cells["week"] == key[2])]
+        share = float(row["share_met"].iloc[0])
+        return 1.0 if np.isnan(share) else share
+
+    def trim_offsets(self, ev: Evaluation, values, round_no: int):
+        """Try to drop the local offsets item by item (cheaper if still feasible)."""
+        for kind, store in (("DC", self.offsets.dc_s), ("RM", self.offsets.rm_s)):
+            for name in list(store):
+                if not store[name].any():
+                    continue
+                trial = self.offsets.copy()
+                if kind == "DC":
+                    trial.dc_s[name][:] = 0
+                    trial.dc_S[name][:] = 0
+                else:
+                    trial.rm_s[name][:] = 0
+                    trial.rm_S[name][:] = 0
+                cand = self.evaluate(self.schedule_of(values, trial))
+                if cand.feasible and cand.cost < ev.cost - 1e-6 and self.confirmed(cand.schedule):
+                    self.offsets, ev = trial, cand
+                    self.record(round_no, "trim", f"dropped offsets {kind} {name}", "", ev)
+        return ev
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+    def starts(self) -> list[tuple[str, dict]]:
+        """Start parameters (multi-start): the classic start (z at the strictest fill-rate
+        target, one week of cover - the simple heuristic), the economic-lot start (EOQ cover
+        per item, bounded by shelf life) and, per product, the economic-lot start with the
+        minimum lot at each price break above its typical lot (all-units discounts: the
+        local search cannot cross the dearer band in between). A warm start (the last
+        review's parameters) replaces them all."""
+        if self.start_values is not None:
+            return [("warm start (parameters of the last review)", dict(self.start_values))]
+        b = self.builder
+        out = [("classic start", b.start_values("classic")), ("economic-lot start", b.start_values("economic"))]
+        econ = out[1][1]
+        for p in self.model.products:
+            typical = b.typical_lot(p.name, econ)
+            for lot in b.price_breaks(p.name)[1:]:
+                if lot > typical:
+                    v = dict(econ)
+                    v[("DC", p.name, "min_lot")] = lot
+                    out.append((f"price-break start {p.name} lot {lot:.0f}", v))
+        return out[:max(1, self.settings.max_starts)]
 
     def run(self) -> OptimisationOutcome:
         with self.workers():
@@ -703,40 +906,58 @@ class Searcher:
 
     def _run(self) -> OptimisationOutcome:
         st = self.settings
-        start, ev, label = self.choose_start()
-        schedule = ev.schedule
-
+        best = None
+        for label, values in self.starts():
+            self.offsets = zero_offsets(self.model)
+            self.unfixable, self.deferred = set(), set()
+            ev = self.evaluate(self.schedule_of(values))
+            self.record(0, "start", label, "", ev)
+            self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
+            ev, values = self.repair(values, 0, mode="global",
+                                            give_up_above=len(best[3]) + 2 if best else np.inf)
+            ev, values = self.line_search(ev, values, 0, n_passes=1, phase="race")
+            self.say(f"    repaired + raced: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
+                     f"cells left to the local repair {len(self.deferred)}")
+            # feasible first, then fewer cells left out, smaller service gap, lower cost
+            key = (not ev.feasible, len(self.unfixable), round(self.service_gap(ev), 2), ev.cost)
+            if best is None or key < best[0]:
+                best = (key, ev, values, set(self.unfixable), set(self.deferred), label)
+        _, ev, values, self.unfixable, self.deferred, label = best
+        self.offsets = zero_offsets(self.model)
+        self.say(f"  chosen start: {label}")
         holdout_rounds, hold_cells = [], None
         for round_no in range(1, st.max_outer_rounds + 1):
-            self.say(f"  round {round_no}")
-            # after a hold-out check the repair is a small correction (margins of ~0.5 pp): finer steps
-            ev = self.repair(schedule, round_no, fraction=None if round_no == 1 else st.step_fraction / 4)
-            schedule = ev.schedule
-            self.say(f"    repair: feasible={ev.feasible}, mean cost {ev.cost:,.0f}, "
-                     f"unfixable cells so far {len(self.unfixable)}")
             if round_no == 1:
-                ev = self.improve(ev, round_no)
-                ev = self.restructure(ev, round_no)
-            else:                                 # converged already: one finer pass after the repair
-                ev = self.improve(ev, round_no, n_passes=1, fraction=st.step_fraction / 2)
-            schedule = ev.schedule
-
-            hold_result = simulate(self.model, schedule, self.holdout_seeds, report_details=False)
+                # phase A: the parameters (global repair, line search)
+                ev, values = self.repair(values, round_no, mode="global")
+                ev, values = self.line_search(ev, values, round_no, n_passes=st.max_improve_passes + 1,
+                                              first_pass=1)
+                # phase B: week-specific exceptions (local repair of the deferred cells, polish)
+                self.unfixable -= self.deferred
+                self.deferred = set()
+                ev, values = self.repair(values, round_no, mode="local")
+                ev = self.trim_offsets(ev, values, round_no)
+                polished = self.improve(ev, round_no, n_passes=1, fraction=st.step_fraction / 2,
+                                        phase="polish", first_level=st.polish_first_level)
+                self.offsets = difference(polished.schedule, self.builder.build(values))
+                ev = polished
+            else:
+                # after a hold-out check the repair is a small local correction (margins of ~0.5 pp)
+                ev, values = self.repair(values, round_no, mode="local", fraction=st.step_fraction / 4)
+                ev, values = self.line_search(ev, values, round_no, n_passes=1, first_pass=3)
+            hold_result = simulate(self.model, ev.schedule, self.holdout_seeds, report_details=False)
             hold_cells = service.cell_table(self.model, hold_result)
             weak = service.holdout_check(hold_cells, self.margins, st.min_margin_bump)
             weak.insert(0, "round", round_no)
             holdout_rounds.append(weak)
-            self.record(round_no, "hold-out", "hold-out check",
-                        f"{len(weak)} weak cells, margins raised", ev)
-            self.say(f"    hold-out check: {len(weak)} weak cells (hold-out share of futures meeting F < alpha)")
+            self.say(f"    hold-out check: {len(weak)} weak cells")
             if weak.empty:
                 break
-            if round_no == st.max_outer_rounds:            # last round: make the raised margins count
-                ev = self.repair(schedule, round_no + 1, fraction=st.step_fraction / 4)
-                ev = self.improve(ev, round_no + 1, n_passes=1, fraction=st.step_fraction / 2)
-                schedule = ev.schedule
-                self.say(f"    max rounds reached - final repair + improve with the raised margins: "
-                         f"feasible={ev.feasible}, mean cost {ev.cost:,.0f}")
-
-        return OptimisationOutcome(start, schedule, self.margins, self.unfixable, self.log,
-                                   holdout_rounds, ev, hold_cells, self.n_evaluations, label)
+            ev, values = self.holdout_repair(ev, values, weak, round_no)
+            if round_no == st.max_outer_rounds:
+                ev, values = self.repair(values, round_no + 1, mode="local", fraction=st.step_fraction / 4)
+                ev, values = self.line_search(ev, values, round_no + 1, n_passes=1, first_pass=3)
+        # the reported baseline is the simple heuristic (s,S): the classic quantile start
+        start = initial_schedule(self.model, st)
+        return OptimisationOutcome(start, ev.schedule, self.margins, self.unfixable, self.log,
+                                   holdout_rounds, ev, hold_cells, self.n_evaluations, label, dict(values))

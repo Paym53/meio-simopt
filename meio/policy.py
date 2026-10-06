@@ -103,7 +103,7 @@ def initial_schedule(model: ModelInput, settings: SearchSettings,
     RMW interval for an order in week t: weeks t .. t + G~ + tau_p + L~   (times BOM quantity)
     (tau_p = RMW -> PF time of the product's slowest BOM material, deterministic)
 
-    Optional (used by start_schedules for cost-aware starts; default = the classic start):
+    Optional arguments (cost-aware covers; default = the classic start, the reported baseline):
       dc_cover / rm_cover : extra weeks of cover m per product / material (default m0)
       dc_min_lot          : minimum lot S - s per product, e.g. a price-break quantity
     The order cap is never below the largest lot S - s, so the cap does not cut the lot.
@@ -200,29 +200,6 @@ def price_break_lots(model: ModelInput, product: Product) -> list[int]:
         if product.moq < lot <= model.site_of(product).capacity and lot <= longest * mean_weekly:
             lots.add(lot)
     return sorted(lots)
-
-
-def start_schedules(model: ModelInput, settings: SearchSettings) -> list[tuple[str, PolicySchedule]]:
-    """Candidate start schedules of the search (multi-start), all from the same samples:
-
-      1. the classic quantile start (one week of extra cover),
-      2. an economic-lot start (cover = EOQ in weeks, per product and material),
-      3. per product, the economic-lot start with the lot raised to each price break
-         (all-units discounts make a larger lot cheaper per unit; local steps of the
-         search cannot jump over the more expensive band in between).
-    The search repairs each start and continues from the cheapest feasible one."""
-    starts = [("quantile start", initial_schedule(model, settings))]
-    dc_cover, rm_cover = economic_cover_weeks(model)
-    economic = initial_schedule(model, settings, dc_cover=dc_cover, rm_cover=rm_cover)
-    starts.append(("economic-lot start", economic))
-    for p in model.products:
-        current_lot = int((economic.dc_S[p.name] - economic.dc_s[p.name]).max())
-        for lot in price_break_lots(model, p):
-            if lot > current_lot:
-                starts.append((f"price-break start {p.name} lot {lot}",
-                               initial_schedule(model, settings, dc_cover=dc_cover, rm_cover=rm_cover,
-                                                dc_min_lot={p.name: lot})))
-    return starts[:max(1, settings.max_starts)]
 
 
 def _mean_weekly_demand(model: ModelInput, product: Product) -> float:

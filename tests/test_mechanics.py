@@ -894,29 +894,41 @@ def test_dc_order_in_the_simulation_uses_the_price_break_round_up():
 # ---------------------------------------------------------------------------
 # Search: start schedules, block moves, guard for unfixable cells
 # ---------------------------------------------------------------------------
-def test_start_schedules_contain_the_classic_start_and_price_break_lots():
+def test_starts_are_the_classic_heuristic_the_economic_lots_and_the_price_breaks():
     from meio.io_json import load_model
-    from meio.policy import economic_cover_weeks, price_break_lots, start_schedules
-    settings = SearchSettings(n_quantile_samples=500)
+    from meio.policy import economic_cover_weeks, price_break_lots
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "example_input.json")
     model = load_model(path)
-    starts = start_schedules(model, settings)
-    classic = initial_schedule(model, settings)
+    s = _searcher(model, n=20)
+    starts = s.starts()
     label, first = starts[0]
-    assert label == "quantile start"
-    assert all(np.array_equal(first.dc_S[k], classic.dc_S[k]) for k in classic.dc_S)
-    assert all(np.array_equal(first.rm_s[k], classic.rm_s[k]) for k in classic.rm_s)
+    assert label == "classic start"
+    classic = initial_schedule(model, s.settings)
+    built = s.builder.build(first)
+    for p in model.products:                         # the classic start is the simple heuristic's s
+        assert np.array_equal(built.dc_s[p.name], classic.dc_s[p.name])
     lots = price_break_lots(model, model.products[0])
     assert lots == [10100, 15100]                      # the MOQ itself is no price break
-    for lot in lots:
-        sched = dict(starts)[f"price-break start FG1 lot {lot}"]
-        weeks = sched.dc_s["FG1"] > 0
-        assert ((sched.dc_S["FG1"] - sched.dc_s["FG1"])[weeks] >= lot).all()
-        assert sched.dc_cap["FG1"] >= lot                # the cap does not cut the lot
+    labels = [lab for lab, _ in starts]
+    assert "economic-lot start" in labels
+    assert any(lab.startswith("price-break start FG1") for lab in labels)
+    assert len(starts) <= s.settings.max_starts
+    for lab, values in starts:
+        if lab.startswith("price-break start"):
+            name, lot = lab.split()[2], float(lab.split()[-1])
+            assert values[("DC", name, "min_lot")] == lot
+            sched = s.builder.build(values)
+            weeks = s.builder.dc_weeks[name]
+            # the lot reaches the break wherever the horizon ceiling allows it, and the cap never cuts it
+            assert sched.dc_cap[name] >= int((sched.dc_S[name] - sched.dc_s[name]).max())
+            assert ((sched.dc_S[name] - sched.dc_s[name])[weeks[:3]] >= lot).all()
     dc_cover, rm_cover = economic_cover_weeks(model)
     strictest = min(model.products[0].max_age_for_channel(c) for c in model.products[0].channels)
     assert 1 <= dc_cover["FG1"] <= strictest - 1          # a lot sells before it is too old
     assert all(c >= 1 for c in rm_cover.values())
+    warm = _searcher(model, n=20)
+    warm.start_values = dict(first)
+    assert [lab for lab, _ in warm.starts()] == ["warm start (parameters of the last review)"]
 
 
 def _searcher(model=None, n=60):
@@ -986,21 +998,20 @@ def test_improve_never_lowers_the_service_of_unfixable_cells():
     s.unfixable_floor = {}
 
 
-def test_search_keeps_the_best_start_and_never_ends_worse_than_its_repaired_start():
+def test_search_keeps_the_best_start_and_the_line_search_only_accepts_cheaper_feasible_moves():
     s = _searcher(build_example_input(horizon=16), n=30)  # short horizon: a fast full search
     s.settings.max_improve_passes = 1
     s.settings.max_outer_rounds = 1
     out = s.run()
     start_rows = [r for r in out.search_log if r["phase"] == "start"]
-    assert [r["action"] for r in start_rows][0] == "quantile start"
-    repaired = [r for r in out.search_log if r["round"] == 0 and r["phase"] != "start"]
+    assert [r["action"] for r in start_rows][0] == "classic start"
     assert out.chosen_start in [r["action"] for r in start_rows]
-    improve = [r for r in out.search_log if r["phase"] == "improve" and r["round"] == 1]
-    costs = [r["mean_cost"] for r in improve]
+    line = [r for r in out.search_log if r["phase"] == "improve" and r["round"] == 1]
+    costs = [r["mean_cost"] for r in line]
     assert costs == sorted(costs, reverse=True)          # every accepted move lowers the cost
-    assert all(r["feasible"] for r in out.search_log if r["phase"] == "improve")
-    chosen_rows = [r for r in start_rows if r["action"] == out.chosen_start]
-    assert len(chosen_rows) == 1
+    assert all(r["feasible"] for r in out.search_log if r["phase"] in ("improve", "race", "polish"))
+    # the result is the parameters' levels plus the week-specific offsets, 5 + 4 parameters per item
+    assert len(out.parameters) == 5 * len(s.model.products) + 4 * len(s.model.materials)
     # the reported baseline is always the simple heuristic (s,S): the classic quantile start
     classic = initial_schedule(s.model, s.settings)
     for name in ("dc_s", "dc_S", "rm_s", "rm_S"):
@@ -1044,7 +1055,7 @@ def test_parallel_search_gives_exactly_the_sequential_result():
         assert all(np.array_equal(a[k], b[k]) for k in a)
     assert seq.schedule.dc_cap == par.schedule.dc_cap and seq.schedule.rm_floor == par.schedule.rm_floor
     accepted = lambda out: [(r["phase"], r["action"], r["mean_cost"]) for r in out.search_log
-                            if r["phase"] in ("improve", "race", "restructure")]
+                            if r["phase"] in ("improve", "race", "polish", "repair", "hold-out repair")]
     assert accepted(seq) == accepted(par)
 
 
@@ -1161,15 +1172,144 @@ def test_repair_pre_builds_when_every_feeding_release_week_is_closed():
     settings = SearchSettings(n_search_seeds=20, n_holdout_seeds=20, n_quantile_samples=200, n_workers=1)
     searcher = Searcher(model, settings, build_scenarios(model, 20, 1, "s"), build_scenarios(model, 20, 2, "h"),
                         verbose=False)
-    schedule = initial_schedule(model, settings)
-    before = schedule.copy()
-    changed, text = searcher.raise_levels_for_cell(schedule, searcher.evaluate(schedule).result, p.name, week)
-    assert changed and "pre-build before closed production weeks" in text
-    # the raise lands in the latest open order week before the closed ones (DC or the RM feeding it)
+    # every release week that reaches `week` is closed: the latest open order week before them feeds it
     target = max(r for r in dc_order_weeks(model, p) if r < window[0])
-    assert schedule.dc_S[p.name][target] > before.dc_S[p.name][target] or \
-        schedule.dc_cap[p.name] > before.dc_cap[p.name] or \
-        any((schedule.rm_S[m] != before.rm_S[m]).any() for m in p.bom)
-    # a week that no release week can reach at all (before the first one) stays unfixable
-    early = model.release_to_dc_min(p)
-    assert searcher.raise_levels_for_cell(schedule, searcher.evaluate(schedule).result, p.name, early)[0] is False
+    assert searcher.feeding_weeks(p, week) == [target]
+    values = searcher.builder.start_values("classic")
+    ev = searcher.evaluate(searcher.schedule_of(values))
+    local = searcher.repair_candidates(values, ev, p.name, week, 0.2, 0.1, "local")
+    label, _, offsets = local[0]
+    assert label == f"local DC {p.name} weeks {target}-{target}"
+    assert offsets.dc_s[p.name][target] > 0 and (np.delete(offsets.dc_s[p.name], target) == 0).all()
+    # a week that no release week can reach at all (before the first one): nothing to raise
+    assert searcher.feeding_weeks(p, model.release_to_dc_min(p)) == []
+    assert searcher.repair_candidates(values, ev, p.name, model.release_to_dc_min(p), 0.2, 0.1, "local") == []
+
+
+# ---------------------------------------------------------------------------
+# Forecast-scaled levels (meio/parametric.py)
+# ---------------------------------------------------------------------------
+def _builder():
+    from meio.parametric import LevelBuilder
+    model = build_example_input(horizon=16)
+    settings = SearchSettings(n_quantile_samples=400)
+    return model, settings, LevelBuilder(model, settings)
+
+
+def test_level_builder_reproduces_the_classic_reorder_levels():
+    model, settings, builder = _builder()
+    built, classic = builder.build(builder.start_values("classic")), initial_schedule(model, settings)
+    p, H = model.products[0], model.horizon
+    for t in builder.dc_weeks[p.name]:
+        if t + model.release_to_dc_max(p) <= H:          # window inside the horizon: same samples, same s
+            assert built.dc_s[p.name][t] == classic.dc_s[p.name][t]
+
+
+def test_levels_rise_with_the_safety_factor_and_lots_with_the_cover():
+    model, _, builder = _builder()
+    p = model.products[0]
+    base = builder.start_values("classic")
+    higher_z, longer = dict(base), dict(base)
+    higher_z[("DC", p.name, "z")] += 0.5
+    longer[("DC", p.name, "cover")] += 2
+    a, b, c = builder.build(base), builder.build(higher_z), builder.build(longer)
+    weeks = builder.dc_weeks[p.name]
+    assert (b.dc_s[p.name][weeks] >= a.dc_s[p.name][weeks]).all() and (b.dc_s[p.name][weeks] > a.dc_s[p.name][weeks]).any()
+    assert ((c.dc_S[p.name] - c.dc_s[p.name])[weeks] >= (a.dc_S[p.name] - a.dc_s[p.name])[weeks]).all()
+    for m in model.materials:                             # RM: same structure
+        r_weeks = builder.rm_weeks[m.name]
+        assert (a.rm_S[m.name][r_weeks] >= a.rm_s[m.name][r_weeks] + m.batch_size).all()
+
+
+def test_order_up_to_level_never_exceeds_what_can_sell_by_the_horizon():
+    model, _, builder = _builder()
+    p = model.products[0]
+    values = builder.start_values("classic")
+    values[("DC", p.name, "cover")] = builder.max_cover("DC", p.name)        # very long lots
+    values[("DC", p.name, "min_lot")] = 10 ** 6                               # and a huge minimum lot
+    sched = builder.build(values)
+    z = values[("DC", p.name, "z")]
+    for t in builder.dc_weeks[p.name]:
+        ceiling = builder._quantile(builder.dc_remaining[p.name][t], z)
+        assert sched.dc_S[p.name][t] <= max(int(np.ceil(ceiling / p.batch_size)) * p.batch_size,
+                                            sched.dc_s[p.name][t] + p.batch_size)
+    # the last order week cannot order more than the remaining horizon demand (plus one batch)
+    last = builder.dc_weeks[p.name][-1]
+    assert sched.dc_S[p.name][last] - sched.dc_s[p.name][last] < 10 ** 6
+
+
+def test_line_search_grid_respects_the_bounds_of_every_parameter():
+    from meio.parametric import Z_MAX, Z_MIN
+    s = _searcher(n=20)
+    values = s.builder.start_values("classic")
+    p, m = s.model.products[0], s.model.materials[0]
+    values[("DC", p.name, "cover")] = 0.25                 # close to the lower bound
+    values[("RM", m.name, "floor")] = 0.5
+    values[("DC", p.name, "end")] = -0.1
+    for key in s.coordinates():
+        for label, new in s.line_candidates(values, key, 1.0):
+            kind, name, param = key
+            changed = {k for k in new if new[k] != values[k]}
+            assert key in changed or label.startswith("cover")          # one parameter (+ RM covers)
+            assert Z_MIN <= new[(kind, name, "z")] <= Z_MAX
+            assert 0 <= new[(kind, name, "cover")] <= s.builder.max_cover(kind, name)
+            assert -3 <= new[(kind, name, "end")] <= 0
+            if param == "floor":
+                assert new[key] >= 0
+            if param == "min_lot":
+                assert new[key] in s.builder.price_breaks(name)
+    # a DC cover move comes with the same move of its materials' covers (echelon coordination)
+    moves = dict(s.line_candidates(values, ("DC", p.name, "cover"), 1.0))
+    both = moves[f"cover DC {p.name} +1 with RM"]
+    assert all(both[("RM", mat, "cover")] == min(values[("RM", mat, "cover")] + 1, s.builder.max_cover("RM", mat))
+               for mat in p.bom)
+    # the coarse grid used to race the starts has fewer points
+    assert len(s.line_candidates(values, ("DC", p.name, "z"), 1.0, coarse=True)) < \
+        len(s.line_candidates(values, ("DC", p.name, "z"), 1.0))
+
+
+def test_repair_offers_a_local_raise_of_a_binding_material_only_where_it_can_arrive():
+    from dataclasses import replace
+    base = build_example_input(horizon=16)
+    scarce = {m: {age: q // 20 for age, q in ages.items()} for m, ages in base.initial_state.rm_stock.items()}
+    model = replace(base, initial_state=replace(base.initial_state, rm_stock=scarce))   # RM cuts releases
+    s = _searcher(model, n=30)
+    values = s.builder.start_values("classic")
+    ev = s.evaluate(s.schedule_of(values))
+    p = model.products[0]
+    # weeks whose feeding releases were cut by a raw material in some future and that an RM order
+    # can still reach: there the repair offers a local RMW raise
+    found = []
+    for week in model.evaluation_weeks:
+        local = s.repair_candidates(values, ev, p.name, week, 0.2, 0.1, "local")
+        rm_moves = [(label, off) for label, _, off in local if label.startswith("local RM")]
+        if rm_moves:
+            found.append((week, rm_moves))
+    assert found, "scarce raw material: a local RMW raise is offered"
+    week, rm_moves = found[0]
+    feeding = s.feeding_weeks(p, week)
+    for label, off in rm_moves:
+        mat = model.material(label.split()[2])
+        raised = np.nonzero(off.rm_s[mat.name])[0]
+        assert len(raised) and all(any(r - mat.lead_time_max <= o <= r - mat.lead_time_min for r in feeding)
+                                   for o in raised)
+        assert off.rm_floor[mat.name] > 0                       # with a higher minimum stock
+    globals_ = [label for label, _, _ in s.repair_candidates(values, ev, p.name, week, 0.2, 0.1, "global")]
+    assert f"z DC {p.name} +0.2" in globals_ and any(label.startswith("z RM") for label in globals_)
+    assert all(not label.startswith("local") for label in globals_)
+
+
+def test_parameters_are_reported_per_item_in_the_summary():
+    from meio.io_json import parameters_dict
+    from meio.tables import parameters_table
+    s = _searcher(n=20)
+    values = s.builder.start_values("economic")
+    out = parameters_dict(s.model, values)
+    p, m = s.model.products[0], s.model.materials[0]
+    assert set(out["products"][p.name]) == {"safety_factor_z", "lot_cover_weeks", "minimum_lot", "order_cap_weeks",
+                                            "end_of_horizon_z_shift"}
+    assert set(out["materials"][m.name]) == {"safety_factor_z", "lot_cover_weeks", "minimum_stock_weeks",
+                                             "end_of_horizon_z_shift"}
+    assert out["n_parameters"] == 5 * len(s.model.products) + 4 * len(s.model.materials) == len(values)
+    table = parameters_table(values)
+    assert len(table) == len(values) and set(table["location"]) == {"DC", "RMW"}

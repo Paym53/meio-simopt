@@ -40,7 +40,7 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 - **BOM quantities** may be fractional (e.g. 0.2). RM shipped for a release = quantity × P rounded **up** to whole units, in exact integer arithmetic (`config.rm_units_for`, `config.max_fg_from`); whole-number BOMs give exactly the old results.
 - **Lookahead.** A candidate may not fail any cell the rule's own quantity passes; among those, the cheapest wins.
 - **Price-break round-up.** The DC order is raised to a price-break quantity (never above the cap) when that is cheaper in total (all-units production + transport tiers); `simulation.round_up_to_price_break`.
-- **Search** (`meio/search.py`, `docs/search_algorithm.md`): multi-start, coarse-to-fine block moves, restructure jumps, confirmation seeds (an accepted move may not make a cell weak there), unfixable cells may not get worse within an improve phase. Parallel evaluation (`n_workers`) must give results identical to sequential (`test_parallel_search_gives_exactly_the_sequential_result`).
+- **Search v3** (`meio/search.py`, `meio/parametric.py`, `docs/search_algorithm.md`): the levels follow the forecast from a few parameters per item (DC: z, cover, min_lot, cap, end; RM: z, cover, floor, end); s = Φ(z)-quantile of the protection-interval demand, S − s = forecast over `cover` weeks, S never above the Φ(z+end)-quantile of the demand left until H. Week-specific exceptions are sparse offsets on top (`Searcher.offsets`). Multi-start (the classic start = the reported baseline), phase A (global repair by marginal analysis, line search, repaired large moves), phase B (local repair, trim, block-move polish), hold-out rounds (margins; repair on the hold-out seeds for cells the search seeds cannot see). Confirmation seeds (an accepted move may not make a cell weak there); deferred and unfixable cells may not get worse within a phase. Parallel evaluation (`n_workers`) must give results identical to sequential (`test_parallel_search_gives_exactly_the_sequential_result`).
 - **JSON contract.** `examples/example_input.json` (input; the app's default dataset, maintained by hand: FG1-FG3 at site S1 sharing materials, FG4 at site S2; the tests and `main.py` without `--input` use the smaller `build_example_input()`) and `summary.json` (output, snake_case keys) are used by a future app. Change them only on purpose, and update `meio/io_json.py`, the examples and `docs/app_integration.md` together.
 
 ## Style
@@ -56,6 +56,6 @@ python scripts/smoke_test.py <url> --key K  # end-to-end check of a deployed API
 - Deployment settings live in `render.yaml` (not the Render dashboard); `tests/test_deployment.py` keeps it consistent with `api.py` and CI. Never commit API keys.
 
 ## Planned next work
-1. Search: fewer parameters (forecast-scaled levels), parallel lookahead.
+1. Parallel lookahead; more parallel batches in the search.
 2. Multi-item constraints (joint MOQ over several products, as a link in `decompose.independent_groups`); realistic holding costs (unit value × rate + storage).
 3. Lovable frontend on top of the web API (`api.py`, deployed on Render; see `docs/app_integration.md`).
