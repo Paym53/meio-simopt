@@ -130,7 +130,7 @@ class Searcher:
         self.verbose = verbose
         self.margins: dict = {}
         self.unfixable: set = set()
-        self.unfixable_floor: dict = {}     # unfixable cell -> search lower bound it must keep
+        self.unfixable_floor: dict = {}     # unfixable cell -> share of search futures it must keep
         self.log: list[dict] = []
         self.n_evaluations = 0
         self.rng = np.random.default_rng(settings.base_seed + 7)
@@ -157,10 +157,11 @@ class Searcher:
                          "feasible": ev.feasible, "failing_cells": ev.n_failing})
 
     def evaluate(self, schedule: PolicySchedule) -> Evaluation:
-        """Simulate the search seeds and apply the search rule. Cells declared unfixable do
-        not count, except during an improve phase: there they must keep at least the service
-        (search lower bound) they had when the phase started (self.unfixable_floor), so cost
-        is never bought with less service on cells the search could not fix."""
+        """Simulate the search seeds and apply the search rule. Cells declared unfixable (or
+        deferred) do not count, except during an improvement phase (line search, polish): there
+        they must keep at least the service (share of search futures meeting F) they had when
+        the phase started (self.unfixable_floor), so cost is never bought with less service on
+        cells the search could not fix."""
         self.n_evaluations += 1
         result = simulate(self.model, schedule, self.search_seeds, report_details=False)
         cells = service.apply_search_rule(service.cell_table(self.model, result),
@@ -208,10 +209,10 @@ class Searcher:
               cuts: dict | None = None) -> Evaluation:
         """Feasibility of an evaluated schedule (see evaluate)."""
         keys = list(zip(cells["product"], cells["channel"], cells["week"]))
-        bound = cells["search_lower_bound"].to_numpy()
+        share = cells["share_met"].to_numpy()
         unfixable = np.array([k in self.unfixable for k in keys])
         kept = np.array([np.isnan(b) or b >= self.unfixable_floor.get(k, -np.inf) - 1e-9
-                         for k, b in zip(keys, bound)])
+                         for k, b in zip(keys, share)])
         failing = int((~cells["search_feasible"].to_numpy() & ~unfixable).sum() + (unfixable & ~kept).sum())
         return Evaluation(schedule, result, cells, cost, failing == 0, failing, cuts)
 
@@ -250,10 +251,11 @@ class Searcher:
         return False
 
     def service_floors(self, ev: Evaluation) -> dict:
-        """Search lower bound of every unfixable cell in `ev` (cells without demand: no floor)."""
+        """Share of search futures meeting F of every unfixable cell in `ev` (cells without
+        demand: no floor)."""
         floors = {}
-        for k, b in zip(zip(ev.cells["product"], ev.cells["channel"], ev.cells["week"]),
-                        ev.cells["search_lower_bound"]):
+        for k, b in zip(zip(ev.cells["product"], ev.cells["channel"], ev.cells["week"]), ev.cells["share_met"]):
+            k = (k[0], k[1], int(k[2]))
             if k in self.unfixable and not np.isnan(b):
                 floors[k] = float(b)
         return floors
@@ -607,8 +609,9 @@ class Searcher:
 
     @staticmethod
     def open_gap(ev: Evaluation, unfixable: set) -> tuple[float, dict]:
-        """Total service gap over the cells that are still to be fixed (sum of alpha - search
-        lower bound where negative), and the lower bound per cell."""
+        """Service gap over the cells that are still to be fixed - the sum of the squared
+        shortfalls (alpha - search lower bound)^2: every cell must reach alpha, so starving one
+        cell weighs more than small gains on several others - and the lower bound per cell."""
         cells = ev.cells
         bounds = {}
         gap = 0.0
@@ -618,7 +621,7 @@ class Searcher:
             b = -1.0 if np.isnan(bound) else float(bound)
             bounds[key] = b
             if not ok and key not in unfixable:
-                gap += max(0.0, target - b)
+                gap += max(0.0, target - b) ** 2
         return gap, bounds
 
     def repair(self, values, round_no: int, dz: float | None = None, give_up_above: float = np.inf,
@@ -626,8 +629,9 @@ class Searcher:
                cost_limit: float = np.inf):
         """Greedy marginal analysis (cf. Sherbrooke's METRIC): while a cell fails the search
         rule, take the earliest failing cell, simulate every possible fix for it at once
-        (repair_candidates, in parallel) and keep the one that moves the cell and has the
-        largest reduction of the total service gap per unit of extra cost.
+        (repair_candidates, in parallel) and keep, among the fixes that lower the total service
+        gap of all open cells, one that moves the cell itself with the largest gap reduction per
+        unit of extra cost.
 
           mode "global": parameters only (phase A); a cell they do not move in 2 steps is
                          deferred to the local repair and may not get worse meanwhile
@@ -674,15 +678,17 @@ class Searcher:
                 continue
             gap_before, bounds_before = self.open_gap(ev, self.unfixable)
             evaluated = self.evaluate_many([self.schedule_of(v, off) for _, v, off in candidates])
-            # rank: fixes that move the cell itself first, then gap reduction per unit of extra cost
+            # a fix must lower the total gap over all open cells (raising one week's stock can starve
+            # another, e.g. older stock for a strict channel); among those: fixes that move the cell
+            # itself first, then gap reduction per unit of extra cost
             best_choice, best_score = None, (-1, -np.inf)
             for (label, v, off), cand in zip(candidates, evaluated):
                 gap_after, bounds_after = self.open_gap(cand, self.unfixable)
                 gain = gap_before - gap_after
                 own = bounds_after[key] - bounds_before[key]
-                if gain <= 1e-9 and own <= st.repair_min_progress:
+                if gain <= 1e-9:
                     continue
-                score = (int(own > st.repair_min_progress), max(gain, 0.0) / max(cand.cost - ev.cost, 1.0))
+                score = (int(own > st.repair_min_progress), gain / max(cand.cost - ev.cost, 1.0))
                 if score > best_score:
                     best_choice, best_score = (label, v, off, cand), score
             if best_choice is None:                    # nothing helps this step: count as no progress
@@ -909,7 +915,7 @@ class Searcher:
         best = None
         for label, values in self.starts():
             self.offsets = zero_offsets(self.model)
-            self.unfixable, self.deferred = set(), set()
+            self.unfixable, self.deferred, self.unfixable_floor = set(), set(), {}
             ev = self.evaluate(self.schedule_of(values))
             self.record(0, "start", label, "", ev)
             self.say(f"  {label}: mean cost {ev.cost:,.0f}, failing cells {ev.n_failing}")
@@ -921,8 +927,8 @@ class Searcher:
             # feasible first, then fewer cells left out, smaller service gap, lower cost
             key = (not ev.feasible, len(self.unfixable), round(self.service_gap(ev), 2), ev.cost)
             if best is None or key < best[0]:
-                best = (key, ev, values, set(self.unfixable), set(self.deferred), label)
-        _, ev, values, self.unfixable, self.deferred, label = best
+                best = (key, ev, values, set(self.unfixable), set(self.deferred), label, dict(self.unfixable_floor))
+        _, ev, values, self.unfixable, self.deferred, label, self.unfixable_floor = best
         self.offsets = zero_offsets(self.model)
         self.say(f"  chosen start: {label}")
         holdout_rounds, hold_cells = [], None
